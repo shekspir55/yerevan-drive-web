@@ -64,6 +64,9 @@ function onMsg(c, m) {
     if (c.room.host !== c || c.room.started) return;
     c.room.started = true; c.room.goAt = Date.now() + 6000;
     for (const o of c.room.members) send(o, { t: 'go', in: 6 });
+  } else if (m.t === 'tr') {   // the host simulates the NPC traffic and relays it, so every player sees (and collides with) the same cars
+    if (c.room.host !== c) return;
+    for (const o of others(c)) send(o, { t: 'tr', c: m.c });
   } else if (m.t === 'siren') {
     c.info.siren = !!m.on;
     for (const o of others(c)) send(o, { t: 'siren', id: c.id, on: !!m.on });

@@ -318,7 +318,7 @@
     let net = null, welcome = null;
     if (state.net) {   // multiplayer: join/create the session first (room settings decide track, laps and game type)
       const d = state.net.d, create = state.net.action === 'create';
-      net = new YDNet({ team: new URLSearchParams(location.search).get('team') || undefined, name: d.name || 'Player', session: create ? undefined : d.session, password: d.password || '', car: state.selected, col: state.color, plate: state.plate || null, create: create ? { session: d.session, maxPlayers: +d.maxPlayers + 2, gameType: d.gameType, laps: d.laps, password: d.password } : undefined }, {});
+      net = new YDNet({ team: new URLSearchParams(location.search).get('team') || undefined, name: d.name || 'Player', session: create ? undefined : d.session, password: d.password || '', car: state.selected, col: state.color, plate: state.plate || (UI && UI.settings ? { type: UI.settings.plateType, text: UI.settings.plateText } : null), create: create ? { session: d.session, maxPlayers: +d.maxPlayers + 2, gameType: d.gameType, laps: d.laps, password: d.password } : undefined }, {});
       await msg('Connecting…'); welcome = await net.ready;
       state.opts.track = welcome.room.track; state.opts.laps = welcome.room.laps; state.mode = welcome.room.gameType === 1 ? 'gonka' : 'walker'; state.gm = welcome.room.gameType === 2 ? { team: welcome.team } : null;
     }
@@ -376,7 +376,7 @@
       if (!modeRace) { phys.pos.x += ((net.id - 1) % 8) * 4; }
       const addRemote = async peer => {
         const c = await YDCar.loadCar(vfs, state.carNames[peer.car] ? peer.car : 'bmw', peer.col, state.carcol);
-        scene.add(c.obj); if (UI && peer.plate) applyPlate(c, UI, peer.plate.type, peer.plate.text); if (R && envCube) R.applyEnvironment(c.obj, envCube, R.C.REFLECT_MAX * 0.6);
+        scene.add(c.obj); if (UI) applyPlate(c, UI, peer.plate ? peer.plate.type : (Math.random() * 10) | 0, peer.plate && peer.plate.text ? peer.plate.text : randPlate());   // every car carries a plate if (R && envCube) R.applyEnvironment(c.obj, envCube, R.C.REFLECT_MAX * 0.6);
         const e = { team: peer.team, id: 'n' + peer.id, name: peer.name, car: c, phys: { pos: new THREE.Vector3(), yaw: 0, speed: 0, steer: 0, pitch: 0, roll: 0, gy: 0, gear: 1, wheels: [], kin: true, mass: 1300, vel: new THREE.Vector3() }, remote: true };
         if (shadowOn) e.shadow = YDSim.makeShadow(c, scene);
         net.remote.set(peer.id, e); remotes.push(e);
@@ -391,7 +391,7 @@
         const e = net.remote.get(m.id); if (!e) return;
         const c = await YDCar.loadCar(vfs, state.carNames[m.car] ? m.car : 'bmw', m.col, state.carcol);
         scene.remove(e.car.obj); if (e.shadow) scene.remove(e.shadow.group);
-        scene.add(c.obj); if (UI && m.plate) applyPlate(c, UI, m.plate.type, m.plate.text); if (R && envCube) R.applyEnvironment(c.obj, envCube, R.C.REFLECT_MAX * 0.6);
+        scene.add(c.obj); if (UI && m.plate) applyPlate(c, UI, m.plate.type, m.plate.text || randPlate()); if (R && envCube) R.applyEnvironment(c.obj, envCube, R.C.REFLECT_MAX * 0.6);
         e.car = c; if (shadowOn) e.shadow = YDSim.makeShadow(c, scene);
       };
       net.hooks.onChat = m => chatLine(m.name + ': ' + m.text);
@@ -409,6 +409,7 @@
         tpl.push({ obj: c.obj, radius: c.radius, wheelBase: (c.parOrig ? c.parOrig.frontAxle + c.parOrig.rearAxle : 2.6), wheels: c.wheels.map(w => ({ front: w.front, pivot: pathTo(c.obj, w.pivot), spin: pathTo(c.obj, w.spin) })) });
       }
       if (tpl.length) traffic = new YDSim.Traffic(world, scene, tpl, opts.trafficCount || 14);
+      if (traffic && net) { traffic.setRemote(!net.isHost); net.hooks.onTraffic = m => { if (traffic.remoteMode) traffic.applyRemote(m.c); }; const oh = net.hooks.onHost; net.hooks.onHost = () => { traffic.setRemote(false); if (oh) oh(); }; }   // network: only the host simulates the traffic, the others show it
     }
     await msg('Loading sound…'); await initAudio(state.selected);
     const amb = world.emitters && AU.ctx ? new YDSim.Ambience(AU.ctx, world, vfs) : null; if (amb) amb.init().catch(e => console.warn('ambience', e));
@@ -468,8 +469,10 @@
     const UI = state.ui, cv = $('uicanvas'); G.lobby = true; G.lobbyChosen = false; UI.lobbyCanGo = false;
     $('hud').style.display = 'none'; $('minimap').style.display = 'none'; if ($('race')) $('race').style.display = 'none';
     cv.style.display = 'block'; cv.style.background = 'transparent'; UI.openOverlay(0x38); cv.focus();
-    if (Q0.has('autogo')) setTimeout(async () => { await swapPlayerCar(); if (G.net.isHost) G.net.sendStart(); }, 2500);   // test aid
+    if (Q0.has('autogo')) setTimeout(async () => { await swapPlayerCar(); if (G.net.isHost) G.net.sendStart(); }, +Q0.get('autogo') > 100 ? +Q0.get('autogo') : 2500);   // test aid (autogo=ms delay)
   }
+  // host: start the game for everybody; other players: wait for the host (the button used to do nothing)
+  function mpGoNow() { const n = G.net; if (!n) return; if (n.goAt) { leaveLobby(); return; } if (n.isHost) n.sendStart(); else toast('Waiting for the host to start the game…'); }
   function leaveLobby() {
     const UI = state.ui, cv = $('uicanvas'); G.lobby = false; UI.lobbyCanGo = false; UI.closeOverlay(); cv.style.display = 'none';
     $('hud').style.display = 'block'; if (G.world.pathLines) $('minimap').style.display = 'block'; if (G.race) $('race').style.display = 'block';
@@ -510,7 +513,11 @@
     else if (c === 'menu') location.href = location.pathname + '?skipsplash=1';
     else if (c === 'exit') { if (state.ui && state.ui.onQuit) state.ui.onQuit(); }
     else if (c === 'mpchoice') swapPlayerCar().catch(e => console.error('car swap', e));
-    else if (c === 'mpgo') { const n = G.net; if (n.goAt) leaveLobby(); else if (n.isHost && G.lobbyChosen) n.sendStart(); }
+    else if (c === 'mpgo') {
+      const n = G.net; if (n.goAt) { leaveLobby(); return; }
+      if (!G.lobbyChosen) swapPlayerCar().catch(e => console.error('car swap', e)).then(() => mpGoNow());   // GO TO CITY without CHOICE CAR first: take the car on screen
+      else mpGoNow();
+    }
   }
   function bindPause() {
     $('pResume').onclick = () => setPaused(false);
@@ -536,12 +543,16 @@
       if (world.collide) world.collide(phys, h);
       for (const a of ais) { a.phys.step(h, a.input); if (world.collide) world.collide(a.phys, h); }
       const bodies = [phys]; for (const a of ais) bodies.push(a.phys); if (traffic) for (const c of traffic.cars) bodies.push(c); if (G && G.remotes) for (const r of G.remotes) bodies.push(r.phys);
-      if (bodies.length > 1) YDSim.collideBodies(bodies);
+      if (bodies.length > 1) YDSim.collideBodies(bodies, h);
     }
     const bad = p => !isFinite(p.pos.x + p.pos.z + p.speed + p.rpm);
     if (bad(phys)) G.reset();
     for (const a of ais) if (bad(a.phys)) { a.needRespawn = true; a.ai.respawn(a); }
-    if (traffic) { traffic.others = [phys, ...ais.map(a => a.phys), ...(G.remotes || []).map(r => r.phys)]; traffic.update(dt, phys.pos); }
+    if (traffic) {
+      traffic.others = [phys, ...ais.map(a => a.phys), ...(G.remotes || []).map(r => r.phys)]; traffic.players = [phys.pos, ...(G.remotes || []).map(r => r.phys.pos)];
+      traffic.update(dt, phys.pos);
+      if (G.net && G.net.isHost && (G.trT = (G.trT || 0) + dt) > 0.1) { G.trT = 0; G.net.sendTraffic(traffic.snapshot()); }
+    }
     if (race) race.update(dt);
     G.t += dt;
   }

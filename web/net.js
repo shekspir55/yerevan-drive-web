@@ -18,6 +18,7 @@
         else if (m.t === 'host') { this.isHost = true; hooks.onHost && hooks.onHost(); }
         else if (m.t === 'car') hooks.onCar && hooks.onCar(m);
         else if (m.t === 'chat') hooks.onChat && hooks.onChat(m);
+        else if (m.t === 'tr') hooks.onTraffic && hooks.onTraffic(m);
         else if (m.t === 'siren') { const r = this.remote.get(m.id); if (r) r.siren = m.on; hooks.onSiren && hooks.onSiren(m); }
         else if (m.t === 'error') this._rej(new Error(m.msg));
         else if (m.t === 'join') hooks.onJoin && hooks.onJoin(m.peer);
@@ -29,6 +30,7 @@
     // Infinity while the host has not pressed GO TO CITY (lobby), then counts down to 0 and below
     countdown() { return this.goAt ? (this.goAt - performance.now()) / 1000 : Infinity; }
     sendCar(c) { if (this.ws.readyState === 1) this.ws.send(JSON.stringify({ t: 'car', car: c.car, col: c.col, plate: c.plate, auto: c.auto })); }
+    sendTraffic(list) { if (this.ws.readyState === 1) this.ws.send(JSON.stringify({ t: 'tr', c: list })); }
     sendStart() { if (this.ws.readyState === 1) this.ws.send(JSON.stringify({ t: 'start' })); }
     sendChat(text) { if (this.ws.readyState === 1) this.ws.send(JSON.stringify({ t: 'chat', text })); }
     sendSiren(on) { if (this.ws.readyState === 1) this.ws.send(JSON.stringify({ t: 'siren', on: !!on })); }

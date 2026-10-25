@@ -888,7 +888,7 @@
     gc.add(new TextButton(ui, 0x34, 0x40000000, big, 0, 0.61, 0.3, 0.064, S('ALL', 'MainMenu', 'MAIN MENU'), ui.sndButton));
     gc.add(new TextButton(ui, 1, 0x40000000, big, 0, 0.71, 0.3, 0.064, S('ALL', 'ExitWindows', 'EXIT WINDOWS'), ui.sndButton));
     gc.onEvent = function (type, p2, p3) {
-      if (type === 8) { gTrans.set(st.auto ? 1 : 0); gPlate.setText(st.plateText); goBtn.setEnabled(!!ui.lobbyCanGo); }   // GO TO CITY starts disabled (FUN_0042a6c0); the game enables it
+      if (type === 8) { gTrans.set(st.auto ? 1 : 0); gPlate.setText(st.plateText); goBtn.setEnabled(true); }   // GO TO CITY starts disabled (FUN_0042a6c0); the game enables it
       const f = this.focus;
       if (f) switch (f.id) {
         case 0x11: if (type === 0xe) { cmd('mpgo'); return 0; } break;       // GO TO CITY (FUN_00426e80: host sends the start message)

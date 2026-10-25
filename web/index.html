@@ -77,6 +77,15 @@ button.alt{background:#232b3b;color:var(--fg);border:1px solid #38445a;margin-to
 <div id="tl" style="right:158px;bottom:82px;width:76px;height:76px">◀</div>
 <div id="tr" style="right:-2px;bottom:82px;width:76px;height:76px">▶</div>
 </div>
+<script>
+// show script errors / lost WebGL on screen (phones have no console): tap the red box to hide it
+(function () {
+  function box(t) { let d = document.getElementById('errbox'); if (!d) { d = document.createElement('div'); d.id = 'errbox'; d.style.cssText = 'position:fixed;left:8px;right:8px;top:8px;max-height:45vh;overflow:auto;background:rgba(150,0,0,.92);color:#fff;font:12px monospace;padding:8px;z-index:99;white-space:pre-wrap'; d.onclick = function () { d.remove(); }; document.body.appendChild(d); } d.textContent += t + '\n'; }
+  window.addEventListener('error', function (e) { box((e.message || 'error') + ' @' + (e.filename || '').split('/').pop() + ':' + (e.lineno || '')); });
+  window.addEventListener('unhandledrejection', function (e) { box('promise: ' + ((e.reason && (e.reason.message || e.reason)) || e)); });
+  window.addEventListener('webglcontextlost', function () { box('WebGL context lost (the browser ran out of graphics memory) - reload the page; try fewer opponents / quality low'); }, true);
+})();
+</script>
 <script src="three.min.js"></script>
 <script src="formats.js"></script>
 <script src="physics-orig.js"></script>

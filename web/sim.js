@@ -184,6 +184,37 @@
       out.x = p[a] + (p[b] - p[a]) * f; out.y = p[a + 1] + (p[b + 1] - p[a + 1]) * f; out.z = p[a + 2] + (p[b + 2] - p[a + 2]) * f;
       out.yaw = Math.atan2(p[b] - p[a], p[b + 2] - p[a + 2]);
     }
+    // one traffic car from template ti (shared by the local spawner and the cars received from the host in network games)
+    build(ti, id, x, y, z, yaw) {
+      const tpl = this.tpl[ti], obj = tpl.obj.clone(true); this.scene.add(obj);
+      const walk = path => { let n = obj; for (const i of path) n = n.children[i]; return n; };
+      const wheels = (tpl.wheels || []).map(w => ({ front: w.front, pivot: walk(w.pivot), spin: walk(w.spin) }));
+      return { id, ti, wheels, wheelBase: tpl.wheelBase || 2.6, steer: 0, waited: 0, speed: 0, obj, pos: new THREE.Vector3(x, y, z), yaw, vel: new THREE.Vector3(), stun: 0, radius: tpl.radius, kin: true };
+    }
+    // network games: the host simulates the traffic and sends it; the other players show the same cars (so nobody drives through a car only they cannot see)
+    snapshot() { return this.cars.map(c => [c.id, c.ti, +c.pos.x.toFixed(2), +c.pos.y.toFixed(2), +c.pos.z.toFixed(2), +c.yaw.toFixed(3), +c.speed.toFixed(1), +c.steer.toFixed(2)]); }
+    setRemote(on) { if (this.remoteMode === on) return; this.remoteMode = on; for (const c of this.cars) this.scene.remove(c.obj); this.cars.length = 0; this.rt = new Map(); }
+    applyRemote(list) {
+      if (!this.rt) this.rt = new Map(); const seen = new Set();
+      for (const [id, ti, x, y, z, yaw, speed, steer] of list) {
+        seen.add(id); let c = this.rt.get(id);
+        if (!c) { if (!this.tpl[ti]) continue; c = this.build(ti, id, x, y, z, yaw); this.rt.set(id, c); this.cars.push(c); }
+        c.tx = x; c.ty = y; c.tz = z; c.tyaw = yaw; c.speed = speed; c.tsteer = steer;
+      }
+      for (const [id, c] of this.rt) if (!seen.has(id)) { this.scene.remove(c.obj); this.cars.splice(this.cars.indexOf(c), 1); this.rt.delete(id); }
+    }
+    updateRemote(dt) {
+      const k = Math.min(1, dt * 10);
+      for (const c of this.cars) {
+        if (c.tx === undefined) continue;
+        const ox = c.pos.x, oz = c.pos.z; const ex = c.tx + Math.sin(c.tyaw) * c.speed * 0.05, ez = c.tz + Math.cos(c.tyaw) * c.speed * 0.05;   // dead-reckon along the heading
+        if (Math.hypot(ex - c.pos.x, ez - c.pos.z) > 20) { c.pos.set(ex, c.ty, ez); c.yaw = c.tyaw; } else { c.pos.x += (ex - c.pos.x) * k; c.pos.z += (ez - c.pos.z) * k; c.pos.y += (c.ty - c.pos.y) * k; let dy = c.tyaw - c.yaw; dy = Math.atan2(Math.sin(dy), Math.cos(dy)); c.yaw += dy * k; }
+        c.steer += (c.tsteer - c.steer) * k; c.vel.set((c.pos.x - ox) / Math.max(dt, 1e-4), 0, (c.pos.z - oz) / Math.max(dt, 1e-4));
+        const rr = c.speed * dt / c.radius; for (const w of c.wheels) { w.spin.rotation.x += rr; w.pivot.rotation.y = w.front ? -c.steer : 0; }
+        const gh = this.world.ground(c.pos.x, c.pos.z, c.pos.y + 0.5); c.obj.position.set(c.pos.x, (gh === null ? c.pos.y : gh) + c.radius + 0.02, c.pos.z); c.obj.rotation.set(0, c.yaw, 0);
+        if (c.pushX || c.pushZ) { c.pushX = c.pushZ = 0; }
+      }
+    }
     spawn(pp) {
       for (let tries = 0; tries < 40; tries++) {
         const q = this.paths[(Math.random() * this.paths.length) | 0]; if (q.length < 12) continue;
@@ -191,19 +222,19 @@
         if (s.y < -2) continue;   // never underground (metro: only the player)
         const d = Math.hypot(s.x - pp.x, s.z - pp.z); if (d < 60 || d > 200) continue;   // keep traffic close: far cars cost draw calls and are tiny anyway
         if (this.cars.some(o => Math.hypot(o.pos.x - s.x, o.pos.z - s.z) < 9)) continue;   // never spawn inside another car
-        const tpl = this.tpl[(Math.random() * this.tpl.length) | 0]; const obj = tpl.obj.clone(true); this.scene.add(obj);
-        const walk = path => { let n = obj; for (const i of path) n = n.children[i]; return n; };
-        const wheels = (tpl.wheels || []).map(w => ({ front: w.front, pivot: walk(w.pivot), spin: walk(w.spin) }));
-        const c = { id: (this.nextId = (this.nextId || 0) + 1), wheels, wheelBase: tpl.wheelBase || 2.6, steer: 0, waited: 0, q, t, speed: 7 + Math.random() * 7, obj, pos: new THREE.Vector3(s.x, s.y, s.z), yaw: s.yaw, vel: new THREE.Vector3(), stun: 0, radius: tpl.radius, kin: true };
+        const ti = (Math.random() * this.tpl.length) | 0, c = this.build(ti, (this.nextId = (this.nextId || 0) + 1), s.x, s.y, s.z, s.yaw);
+        c.q = q; c.t = t; c.speed = 7 + Math.random() * 7; c.waited = 0;
         this.cars.push(c); return true;
       }
       return false;
     }
     update(dt, pp) {
-      if (this.cars.length < this.max && pp.y > -2.5 && Math.random() < dt * 3) this.spawn(pp);
+      if (this.remoteMode) { this.updateRemote(dt); return; }
+      const players = this.players && this.players.length ? this.players : [pp], above = players.filter(p => p.y > -2.5);
+      if (this.cars.length < this.max && above.length && Math.random() < dt * 3) this.spawn(above[(Math.random() * above.length) | 0]);
       for (let i = this.cars.length - 1; i >= 0; i--) {
         const c = this.cars[i]; c.stun = Math.max(0, c.stun - dt);
-        if (c.pos.y < -2 || pp.y < -2.5 && Math.hypot(c.pos.x - pp.x, c.pos.z - pp.z) < 120) { this.scene.remove(c.obj); this.cars.splice(i, 1); continue; }   // metro: no traffic
+        if (c.pos.y < -2 || players.some(p => p.y < -2.5 && Math.hypot(c.pos.x - p.x, c.pos.z - p.z) < 120)) { this.scene.remove(c.obj); this.cars.splice(i, 1); continue; }   // metro: no traffic
         // car following: slow down (to a stop) for any car (traffic, rivals, the player) right in front on the same lane, so traffic cars never drive through each other
         if (c.cruise === undefined) c.cruise = c.speed;
         let lim = c.cruise; const sy = Math.sin(c.yaw), cyw = Math.cos(c.yaw);
@@ -243,45 +274,54 @@
         s.x = c.pos.x; s.z = c.pos.z; s.yaw = c.yaw;
         const gh = this.world.ground(s.x, s.z, s.y + 0.5); c.obj.position.set(s.x, (gh === null ? s.y : gh) + c.radius + 0.02, s.z);
         c.obj.rotation.set(0, s.yaw, 0);
-        if (Math.hypot(s.x - pp.x, s.z - pp.z) > 260) { this.scene.remove(c.obj); this.cars.splice(i, 1); }
+        if (!players.some(p => Math.hypot(s.x - p.x, s.z - p.z) < 260)) { this.scene.remove(c.obj); this.cars.splice(i, 1); }
       }
     }
   }
 
   // ---------- car vs car collisions (2 circles each) ----------
-  function collideBodies(bodies) {
-    const R = 1.1, off = 1.3;
+  // The original (FUN_0041f900) tests the body corners and edge midpoints of one car against the other car's box and separates the two along the shortest way
+  // (shares by mass), then applies the soft contact impulse at the contact point. Here: exact oriented-rectangle test (separating axis, car footprint 1.9 x 4.4 m)
+  // -> minimum translation axis and penetration; contact point = the deepest corner.
+  const HW = 0.95, HL = 2.2;
+  function collideBodies(bodies, dt) {
+    const PH = global.YDPhysOrig, step = dt || 0.008;
     for (let i = 0; i < bodies.length; i++) for (let j = i + 1; j < bodies.length; j++) {
       const a = bodies[i], b = bodies[j];
-      if (Math.abs(a.pos.x - b.pos.x) > 8 || Math.abs(a.pos.z - b.pos.z) > 8) continue;
+      if (Math.abs(a.pos.x - b.pos.x) > 7 || Math.abs(a.pos.z - b.pos.z) > 7) continue;
       if (a.kin && b.kin) continue;
-      const fa = [Math.sin(a.yaw), Math.cos(a.yaw)], fb = [Math.sin(b.yaw), Math.cos(b.yaw)];
-      for (const sa of [-off, off]) for (const sb of [-off, off]) {
-        const ax = a.pos.x + fa[0] * sa, az = a.pos.z + fa[1] * sa, bx = b.pos.x + fb[0] * sb, bz = b.pos.z + fb[1] * sb;
-        let dx = ax - bx, dz = az - bz; const d = Math.hypot(dx, dz); if (d >= 2 * R || d < 1e-5) continue;
-        dx /= d; dz /= d; const pen = 2 * R - d;
-        const PH = global.YDPhysOrig;
-        if (a.kin || b.kin) {
-          // traffic cars are dynamic bodies in the original: a hit pushes them with the momentum they receive (FUN_0041f900 impulse), they are not frozen
-          const kin = a.kin ? a : b; kin.stun = 0.25;
-          if (PH) {
-            if (kin.mass === undefined) kin.mass = 1300;
-            const vx = kin.vel.x, vz = kin.vel.z; PH.resolveCarCollision(a, b, dx, dz, pen, undefined, undefined, undefined, { dt: 0.008 }); kin.vel.x = vx; kin.vel.z = vz;
-            const sg = a.kin ? 1 : -1, sx = dx * sg, sz = dz * sg, other = a.kin ? b : a, rel = Math.max(0, (other.vel.x - vx) * sx + (other.vel.z - vz) * sz);
-            kin.pushX = (kin.pushX || 0) + sx * rel * 0.012; kin.pushZ = (kin.pushZ || 0) + sz * rel * 0.012;   // shoved away with the momentum it receives
-            continue;
-          }
-          const dyn = a.kin ? b : a, sgn = a.kin ? -1 : 1;
-          dyn.pos.x += dx * sgn * pen; dyn.pos.z += dz * sgn * pen;
-          const vn = dyn.vel.x * dx * sgn + dyn.vel.z * dz * sgn; if (vn < 0) { dyn.vel.x -= 1.2 * vn * dx * sgn; dyn.vel.z -= 1.2 * vn * dz * sgn; }
-        } else if (PH) {
-          PH.resolveCarCollision(a, b, dx, dz, pen, undefined, undefined, undefined, { dt: 0.008 });
-        } else {
-          a.pos.x += dx * pen / 2; a.pos.z += dz * pen / 2; b.pos.x -= dx * pen / 2; b.pos.z -= dz * pen / 2;
-          const vn = (a.vel.x - b.vel.x) * dx + (a.vel.z - b.vel.z) * dz;
-          if (vn < 0) { const j2 = -1.25 * vn / 2; a.vel.x += j2 * dx; a.vel.z += j2 * dz; b.vel.x -= j2 * dx; b.vel.z -= j2 * dz; }
-        }
+      const fa = [Math.sin(a.yaw), Math.cos(a.yaw)], ra = [fa[1], -fa[0]], fb = [Math.sin(b.yaw), Math.cos(b.yaw)], rb = [fb[1], -fb[0]];
+      const dx = a.pos.x - b.pos.x, dz = a.pos.z - b.pos.z;
+      let best = 1e9, nx = 0, nz = 0, owner = 0;
+      const axes = [[ra, HW, 0], [fa, HL, 0], [rb, HW, 1], [fb, HL, 1]];
+      let sep = false;
+      for (const [ax, , who] of axes) {
+        const pa = Math.abs(ax[0] * ra[0] + ax[1] * ra[1]) * HW + Math.abs(ax[0] * fa[0] + ax[1] * fa[1]) * HL;   // projection radius of a on this axis
+        const pb = Math.abs(ax[0] * rb[0] + ax[1] * rb[1]) * HW + Math.abs(ax[0] * fb[0] + ax[1] * fb[1]) * HL;
+        const d = dx * ax[0] + dz * ax[1], ov = pa + pb - Math.abs(d);
+        if (ov <= 0) { sep = true; break; }
+        if (ov < best) { best = ov; const sg = d >= 0 ? 1 : -1; nx = ax[0] * sg; nz = ax[1] * sg; owner = who; }
       }
+      if (sep) continue;
+      // contact point: the corner of the rectangle that penetrates deepest (opposite to the normal)
+      const rect = owner === 0 ? b : a, rr = owner === 0 ? rb : ra, ff = owner === 0 ? fb : fa, sgn = owner === 0 ? -1 : 1;
+      let cx = rect.pos.x, cz = rect.pos.z, deep = 1e9;
+      for (const sx of [-1, 1]) for (const sl of [-1, 1]) {
+        const px = rect.pos.x + rr[0] * HW * sx + ff[0] * HL * sl, pz = rect.pos.z + rr[1] * HW * sx + ff[1] * HL * sl, d2 = (px * nx + pz * nz) * sgn;
+        if (d2 < deep) { deep = d2; cx = px; cz = pz; }
+      }
+      const cy = ((a.pos.y || 0) + (b.pos.y || 0)) / 2;
+      if (a.kin || b.kin) {
+        // traffic cars follow their lane; they hesitate briefly and are shoved by the momentum they receive
+        const kin = a.kin ? a : b; kin.stun = 0.25;
+        if (PH) {
+          if (kin.mass === undefined) kin.mass = 1300;
+          const vx = kin.vel.x, vz = kin.vel.z; PH.resolveCarCollision(a, b, nx, nz, best, cx, cy, cz, { dt: step }); kin.vel.x = vx; kin.vel.z = vz;
+          const sg = a.kin ? 1 : -1, sx = nx * sg, sz = nz * sg, other = a.kin ? b : a, rel = Math.max(0, (other.vel.x - vx) * sx + (other.vel.z - vz) * sz);
+          kin.pushX = Math.max(-9, Math.min(9, (kin.pushX || 0) + sx * rel * 0.02)); kin.pushZ = Math.max(-9, Math.min(9, (kin.pushZ || 0) + sz * rel * 0.02));
+        }
+      } else if (PH) PH.resolveCarCollision(a, b, nx, nz, best, cx, cy, cz, { dt: step });
+      else { a.pos.x += nx * best / 2; a.pos.z += nz * best / 2; b.pos.x -= nx * best / 2; b.pos.z -= nz * best / 2; }
     }
   }
 
