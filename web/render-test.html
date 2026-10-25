@@ -1,0 +1,23 @@
+<!doctype html><meta charset="utf-8"><title>render-orig test</title>
+<style>html,body{margin:0;background:#445}canvas{display:block}</style>
+<body><script src="three.min.js"></script><script src="formats.js"></script><script src="render-orig.js"></script>
+<script>
+window.onerror=m=>{document.title='ERR '+m};
+(async()=>{try{
+const q=new URLSearchParams(location.search), car=q.get('car')||'G500', t=+(q.get('t')||0.55), env=q.get('env')!=='0';
+const vfs=new YD.VFS();
+const R=new THREE.WebGLRenderer({antialias:true}); R.setSize(700,500); document.body.appendChild(R.domElement);
+const S=new THREE.Scene(), cam=new THREE.PerspectiveCamera(); const rig=YDRender.setupScene(S,R,cam,{aspect:700/500});
+S.background=new THREE.Color(0x56627f);
+const ref=YD.parseRef(await vfs.bytes(`Cars/${car}/avto.ref`));
+const ts=[await YD.TexSet.load(vfs,`Cars/${car}/avto.tex`),await YD.TexSet.load(vfs,'Cars/carmat.tex')];
+const built=await YD.buildRef(ref,ts); built.parts.bound&&(built.parts.bound.visible=false);
+const idx=await YDRender.paintMaterialIndices(vfs,car); YDRender.applyCarPaint(built.materials,idx,[0.78,0.78,0.8]);
+const cube=await YDRender.buildEnvCube(vfs); if(env) YDRender.applyEnvironment(built.group,cube,q.get('f')?+q.get('f'):0.5);
+// wheels: put tyres where the par says (reuse car.js maths minimal): skip, body only
+S.add(built.group);
+const box=new THREE.Box3().setFromObject(built.group), c=box.getCenter(new THREE.Vector3()), r=box.getSize(new THREE.Vector3()).length();
+cam.fov=30; cam.updateProjectionMatrix(); cam.position.set(c.x+Math.sin(t)*r*1.4,c.y+r*0.2,c.z+Math.cos(t)*r*1.4); cam.lookAt(c);
+R.render(S,cam); document.title='ok paint='+idx.join(',');
+}catch(e){document.title='ERR '+e.stack}})();
+</script>

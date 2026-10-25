@@ -1,0 +1,33 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>YD model viewer</title>
+<style>html,body{margin:0;background:#789;overflow:hidden}#msg{position:fixed;left:8px;top:8px;color:#fff;font:12px monospace;white-space:pre}</style>
+</head><body><div id="msg">loading…</div>
+<script src="three.min.js"></script><script src="formats.js"></script><script src="car.js"></script>
+<script>
+(async()=>{
+  const q=new URLSearchParams(location.search), car=q.get('car')||'bmw', file=q.get('ref'), tex=q.get('tex');
+  const vfs=new YD.VFS();
+  const R=new THREE.WebGLRenderer({antialias:true}); R.setSize(innerWidth,innerHeight); document.body.appendChild(R.domElement);
+  const S=new THREE.Scene(); S.background=new THREE.Color(0x8aa4c0);
+  S.add(new THREE.HemisphereLight(0xffffff,0x555566,0.9)); const L=new THREE.DirectionalLight(0xffffff,0.8); L.position.set(5,10,7); S.add(L);
+  const C=new THREE.PerspectiveCamera(50,innerWidth/innerHeight,0.1,2000);
+  if(!file){ const ini=await vfs.ini('Cars/carcol.ini'); const cc=Object.keys(ini).map(k=>[+ini[k].R,+ini[k].G,+ini[k].B]);
+    const cr=await YDCar.loadCar(vfs,car,+(q.get('col')||1),cc); S.add(cr.obj); window.CR=cr;
+    const box=new THREE.Box3().setFromObject(cr.obj), c=box.getCenter(new THREE.Vector3()), sz=box.getSize(new THREE.Vector3());
+    document.getElementById('msg').textContent=cr.par.name+' mass '+cr.par.mass+' wheel r '+cr.radius.toFixed(2)+'\nsize '+sz.toArray().map(x=>x.toFixed(2)).join(' x ');
+    const r=Math.max(sz.x,sz.y,sz.z)*1.3; let t=+q.get('t')||0.7;
+    function draw(){ t+= q.has('t')?0:0.005; C.position.set(c.x+Math.sin(t)*r,c.y+r*0.35,c.z+Math.cos(t)*r); C.lookAt(c); R.render(S,C); requestAnimationFrame(draw); }
+    draw(); window.READY=true; return; }
+  const refPath=file||`Cars/${car}/avto.ref`, texPath=tex||`Cars/${car}/avto.tex`;
+  const ref=YD.parseRef(await vfs.bytes(refPath));
+  const ts=[await YD.TexSet.load(vfs,texPath)];
+  if(!file) ts.push(await YD.TexSet.load(vfs,'Cars/carmat.tex'));
+  const o=await YD.buildRef(ref,ts);
+  S.add(o.group); for(const n of (q.get('hide')||'bound').split(',')) if(o.parts[n]) o.parts[n].visible=false;
+  const box=new THREE.Box3().setFromObject(o.group), c=box.getCenter(new THREE.Vector3()), sz=box.getSize(new THREE.Vector3());
+  document.getElementById('msg').textContent=refPath+'\nparts: '+Object.keys(o.parts).join(', ')+'\nsize '+sz.toArray().map(x=>x.toFixed(2)).join(' x ');
+  const r=Math.max(sz.x,sz.y,sz.z)*1.3; let t=+q.get('t')||0.7;
+  function draw(){ t+= q.has('t')?0:0.005; C.position.set(c.x+Math.sin(t)*r,c.y+r*0.4,c.z+Math.cos(t)*r); C.lookAt(c); R.render(S,C); requestAnimationFrame(draw); }
+  draw(); window.READY=true;
+})().catch(e=>{document.getElementById('msg').textContent='ERROR '+e.stack; window.READY=true;});
+</script></body></html>

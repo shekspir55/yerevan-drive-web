@@ -1,0 +1,10 @@
+# local only: Wine prefix (system files, caches), installer/keygen, logs, test output
+/wineprefix/**
+!/wineprefix/drive_c/Program Files (x86)/Emergency/Yerevan Drive version 1.1/**
+/wine-native-backup/
+/setup.exe
+/YerevanDrive_v1.1_KeyGen.exe
+*.log
+*.tmp
+node_modules/
+/wineprefix/drive_c/Program Files (x86)/Emergency/Yerevan Drive version 1.1/key.dat

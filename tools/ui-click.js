@@ -1,0 +1,2 @@
+const w=ms=>new Promise(r=>setTimeout(r,ms));const cv=document.getElementById("uicanvas");const R=cv.getBoundingClientRect();
+const click=async(x,y)=>{const o={clientX:R.left+x*R.width/1024,clientY:R.top+y*R.height/768,bubbles:true,button:0};cv.dispatchEvent(new MouseEvent("mousemove",o));await w(300);cv.dispatchEvent(new MouseEvent("mousedown",o));await w(80);cv.dispatchEvent(new MouseEvent("mouseup",o));cv.dispatchEvent(new MouseEvent("click",o));await w(300)};

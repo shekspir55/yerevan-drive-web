@@ -1,0 +1,15 @@
+<!doctype html><meta charset="utf-8"><body style="margin:0;background:#468">
+<script src="three.min.js"></script><script src="formats.js"></script>
+<script>
+window.onerror=function(m){document.body.append('ERR '+m)};
+(async function(){try{
+const q=new URLSearchParams(location.search);const vfs=new YD.VFS();
+const ts=await YD.TexSet.load(vfs,q.get('tex'));
+const names=(q.get('n')||[...ts.files.keys()].join(',')).split(',');
+for(const n of names){const t=await ts.get(n);if(!t){document.body.append(' missing '+n+' '+(window.YD_ERR||[]).join(';'));continue;}
+const c=document.createElement('canvas');c.width=t.image.width;c.height=t.image.height;const g=c.getContext('2d');
+const id=g.createImageData(c.width,c.height);id.data.set(t.image.data);g.putImageData(id,0,0);
+c.style.cssText='width:200px;height:200px;margin:2px;border:1px solid #fff';document.body.appendChild(c);
+document.body.append(' '+n+' '+c.width+'x'+c.height+(t.ydAlpha?'A':''));}
+}catch(e){document.body.append('ERR '+e.stack)}})();
+</script>
