@@ -9,13 +9,13 @@
   // ---------- put a car's mesh on the ground (tilted to the 4 wheel contact heights) ----------
   function placeCar(e, dt, world) {
     const ph = e.phys, car = e.car, cy = Math.cos(ph.yaw), sy = Math.sin(ph.yaw);
-    if (ph.tunnel && ph.basis) {   // underground: the body can be at any attitude (walls, ceiling) -> place it from the physics basis
+    if (ph.basis) {   // physics body (OrigCarPhysics): the mesh takes its full 3D attitude (slopes, kerbs, tube walls and ceiling)
       const b = ph.basis, f = new THREE.Vector3(b.f[0], b.f[1], b.f[2]), u = new THREE.Vector3(b.u[0], b.u[1], b.u[2]), x = new THREE.Vector3().crossVectors(u, f).normalize();
       (placeCar._m = placeCar._m || new THREE.Matrix4()).makeBasis(x, u, f); car.obj.quaternion.setFromRotationMatrix(placeCar._m);
       const off = (ph._cgHeight ? ph._cgHeight() : 0.6) - car.radius - 0.02;
       car.obj.position.set(ph.pos.x - u.x * off, ph.pos.y - u.y * off, ph.pos.z - u.z * off);
       const rr = ph.speed * dt / car.radius; for (const w of car.wheels) { w.spin.rotation.x += rr; w.pivot.rotation.y = w.front ? -ph.steer : 0; }
-      e.gy = ph.gy = ph.pos.y - off; e.tp = e.tr = 0; return;
+      e.gy = ph.gy === undefined ? ph.pos.y - off : ph.gy; e.tp = e.tr = 0; return;   // gy = mean wheel contact height (shadow, tyre marks)
     }
     let sum = 0, n = 0, hF = 0, nF = 0, hR = 0, nR = 0, hP = 0, nP = 0, hN = 0, nN = 0;
     const ref = ph.gy === undefined ? 0 : ph.gy;
@@ -138,7 +138,7 @@
     }
     respawn(e) {
       const r = this.r, i = ahead(r, this.idx < 0 ? 0 : this.idx, 14), ph = e.phys;
-      ph.pos.set(r.xs[i], r.ys[i], r.zs[i]); ph.yaw = heading(r, i); ph.gy = r.ys[i]; ph.vel.set(0, 0, 0); ph.speed = 0; ph.yawRate = 0; ph.gear = 1; ph.steer = 0;
+      ph.pos.set(r.xs[i], r.ys[i], r.zs[i]); ph.yaw = heading(r, i); ph.gy = r.ys[i]; ph.vel.set(0, 0, 0); ph.speed = 0; ph.yawRate = 0; ph.gear = 1; ph.steer = 0; ph._init = false;   // re-placed on the ground by the next step
       this.idx = i; this.stuck = 0; this.rev = 0; e.needRespawn = false;
     }
   }
@@ -160,7 +160,7 @@
         else if (prev > r.n * 0.8 && en.idx < r.n * 0.2) en.lap++;
         else if (prev < r.n * 0.2 && en.idx > r.n * 0.8) en.lap--;
         en.progress = en.lap * r.len + r.d[en.idx];
-        if (!en.done && this.state !== 'countdown' && en.lap >= this.laps) { en.done = true; en.time = this.t; }
+        if (!en.done && !en.ext && this.state !== 'countdown' && en.lap >= this.laps) { en.done = true; en.time = this.t; }   // ext: network player, finished by its owner's 'fin' message
       }
       if (this.player.done && this.finishedAt === null) this.finishedAt = this.t;
     }
@@ -169,12 +169,20 @@
   }
 
   // ---------- road traffic along the decoded path network ----------
+  // Every traffic car is a full OrigCarPhysics body (mass, inertia and wheels from its template's avto.par) driven by the traffic controller FUN_0041b880
+  // (drive(): digital flags like the keyboard), so a hit pushes and spins it and the controller steers it back. Network clients show the host's cars as
+  // kinematic stand-ins (applyRemote / updateRemote; linear-only bodies for collideCars).
   class Traffic {
     constructor(world, scene, templates, max) {
       this.world = world; this.scene = scene; this.tpl = templates; this.max = max; this.cars = [];
       this.paths = world.pathLines;
-      this.bodies = [];
     }
+    // entries for TyreFx: simulated cars have real wheels (phys.wheels slip); kinematic ones only get slip when braking hard
+    fxEnts() { return this.cars.map(c => { if (c.phys) { const f = c.fx || (c.fx = { id: 't' + c.id, car: c.car, phys: c.phys }); f.gy = c.gy; return f; } const f = c.fx || (c.fx = { id: 't' + c.id, car: c.car, phys: { wheels: [0, 1, 2, 3].map(() => ({ contact: true, slip: 0 })), speed: 0 } }); for (const w of f.phys.wheels) w.slip = c.slip || 0; f.phys.speed = Math.abs(c.speed); f.gy = c.obj.position.y - c.radius - 0.02; return f; }); }
+    colliders() { return this.cars.map(c => c.phys || c); }   // bodies for collideBodies / crash sounds (noteHit writes hitJ on these)
+    // one physics step of every simulated car inside stepWorld's sub-step loop (first = the frame's first step: a gear shift is an edge)
+    // cars more than 60 m from every player / rival take one step per frame (the original's own rate: one physics step per frame up to 0.02 s), the near ones the sub-steps
+    step(h, first) { const w = this.world; for (const c of this.cars) { const ph = c.phys; if (!ph || !c.inp || !(c.near || first)) continue; if (first && !this.remoteMode) { const fd = this.frameDt || h; c.stA = (c.stA || 0) + (c.inp.steer || 0) * fd; c.stT = (c.stT || 0) + fd; } const dt = c.near ? h : this.frameDt || h; ph.step(dt, first || !c.inp.shift ? c.inp : Object.assign({}, c.inp, { shift: 0 })); if (w.collide) w.collide(ph, dt); } }
     pathAt(b, p) { return this.paths.find(q => q.b === b && q.p === p); }
     linkTarget(b, v) { const lo = v & 0xffff, hi = v >>> 16; if (lo === 0) return [b, hi]; const nb = this.world.cit.blocks[b].dw[lo - 1]; return nb === undefined ? null : [nb, hi]; }
     cum(q) { if (!q.cum) { const n = q.pts.length / 3, c = new Float32Array(n); for (let i = 1; i < n; i++) c[i] = c[i - 1] + Math.hypot(q.pts[i * 3] - q.pts[i * 3 - 3], q.pts[i * 3 + 2] - q.pts[i * 3 - 1]); q.cum = c; } return q.cum; }
@@ -185,34 +193,70 @@
       out.yaw = Math.atan2(p[b] - p[a], p[b + 2] - p[a + 2]);
     }
     // one traffic car from template ti (shared by the local spawner and the cars received from the host in network games)
-    build(ti, id, x, y, z, yaw) {
+    // dyn: simulated here (OrigCarPhysics + controller state), else a kinematic stand-in for a car the host simulates
+    build(ti, id, x, y, z, yaw, dyn) {
       const tpl = this.tpl[ti], obj = tpl.obj.clone(true); this.scene.add(obj);
       const walk = path => { let n = obj; for (const i of path) n = n.children[i]; return n; };
-      const wheels = (tpl.wheels || []).map(w => ({ front: w.front, pivot: walk(w.pivot), spin: walk(w.spin) }));
-      return { id, ti, wheels, wheelBase: tpl.wheelBase || 2.6, steer: 0, waited: 0, speed: 0, obj, pos: new THREE.Vector3(x, y, z), yaw, vel: new THREE.Vector3(), stun: 0, radius: tpl.radius, kin: true };
+      const wheels = (tpl.wheels || []).map(w => ({ front: w.front, pivot: walk(w.pivot), spin: walk(w.spin), pos: w.pos || new THREE.Vector3() })), parts = {};
+      for (const k in tpl.parts || {}) parts[k] = walk(tpl.parts[k]);   // tormz / zadni (lamps), bound (shadow)
+      const c = { id, ti, wheels, parts, car: { obj, wheels, radius: tpl.radius }, box: tpl.box, bnd: tpl.bnd, mass: tpl.par ? tpl.par.mass : 1300, boxLift: tpl.radius + 0.02, wheelBase: tpl.wheelBase || 2.6, steer: 0, waited: 0, speed: 0, braking: false, obj, pos: new THREE.Vector3(x, y, z), yaw, vel: new THREE.Vector3(), radius: tpl.radius };
+      const O = global.YDPhysOrig;
+      if (dyn && tpl.par && O) {
+        const ph = c.phys = new O.OrigCarPhysics(tpl.par, tpl.radius, { groundFn: (gx, gz, gy) => this.world.ground(gx, gz, gy) });
+        ph.pos.set(x, y, z); ph.yaw = yaw; ph.gy = y; ph.bnd = tpl.bnd; ph.box = tpl.box; ph.boxLift = c.boxLift; c.pos = ph.pos; c.vel = ph.vel;
+        c.cruise = Math.random() * 12 + 10; c.n = 0; c.stuckT = 0; c.revT = -1; c.lowT = 0;   // +0x74 cruise speed rand01*12 + 10 m/s; +0xb4 frame counter; +0xc4 timer; +0xc8 reverse mode
+      } else c.kin = true;   // the host's car (pos.y = its CG, as sent)
+      return c;
     }
     // network games: the host simulates the traffic and sends it; the other players show the same cars (so nobody drives through a car only they cannot see)
-    snapshot() { return this.cars.map(c => [c.id, c.ti, +c.pos.x.toFixed(2), +c.pos.y.toFixed(2), +c.pos.z.toFixed(2), +c.yaw.toFixed(3), +c.speed.toFixed(1), +c.steer.toFixed(2)]); }
-    setRemote(on) { if (this.remoteMode === on) return; this.remoteMode = on; for (const c of this.cars) this.scene.remove(c.obj); this.cars.length = 0; this.rt = new Map(); }
-    applyRemote(list) {
-      if (!this.rt) this.rt = new Map(); const seen = new Set();
-      for (const [id, ti, x, y, z, yaw, speed, steer] of list) {
+    // entry: [id, ti, x, y, z, yaw, speed, steer, brake] (old clients read only these) + the full body state of the original's 0xf message (YDNet.packBody, 22 numbers)
+    snapshot() { const N = global.YDNet; return this.cars.map(c => { const a = [c.id, c.ti, +c.pos.x.toFixed(2), +c.pos.y.toFixed(2), +c.pos.z.toFixed(2), +c.yaw.toFixed(3), +c.speed.toFixed(1), +c.steer.toFixed(2), c.braking ? 1 : 0]; if (N && c.phys) { a.push(...N.packBody(c.phys, c.inp && c.stT ? Object.assign({}, c.inp, { steer: c.stA / c.stT }) : c.inp || {})); c.stA = c.stT = 0; } return a; }); }   // steer input = mean since the last snapshot (the controller pulses left/right per frame)
+    // host change (network): the simulated cars stay where they are (traffic handover). A new host gives each car the controller state of the path it is on
+    // (cars with no path within 6 m along their heading are dropped), a former host keeps its cars as copies that the new host's snapshots correct (same ids).
+    setRemote(on) {
+      if (this.remoteMode === on) return; this.remoteMode = on;
+      const keep = this.cars.filter(c => c.phys && c.phys._init && (on || this.adopt(c)));
+      for (const c of this.cars) if (!keep.includes(c)) this.scene.remove(c.obj);
+      this.cars.splice(0, this.cars.length, ...keep); this.rt = new Map(on ? keep.map(c => [c.id, c]) : []);
+      if (!on) this.nextId = Math.max(this.nextId || 0, ...keep.map(c => c.id));
+    }
+    adopt(c) {
+      const ph = c.phys, fx = Math.sin(ph.yaw), fz = Math.cos(ph.yaw); let best = 36, bq = null;
+      for (const q of this.paths) {
+        const p = q.pts, n = p.length / 3; if (q.length < 12 || ph.pos.x < q.x0 - 6 || ph.pos.x > q.x1 + 6 || ph.pos.z < q.z0 - 6 || ph.pos.z > q.z1 + 6) continue;
+        for (let i = 0; i < n - 1; i++) {
+          const ax = p[i * 3], az = p[i * 3 + 2], ex = p[i * 3 + 3] - ax, ez = p[i * 3 + 5] - az, l2 = ex * ex + ez * ez || 1e-9; if ((ex * fx + ez * fz) / Math.sqrt(l2) < 0.5) continue;
+          const f = clamp(((ph.pos.x - ax) * ex + (ph.pos.z - az) * ez) / l2, 0, 1), dx = ax + ex * f - ph.pos.x, dz = az + ez * f - ph.pos.z, d = dx * dx + dz * dz; if (d < best) { best = d; bq = q; }
+        }
+      }
+      if (!bq) return false;
+      c.q = bq; c.t = this.project(bq, ph.pos.x, ph.pos.z, 0, 1e9); c.nq = undefined; c.cruise = Math.random() * 12 + 10; c.n = 0; c.stuckT = 0; c.revT = -1; c.lowT = 0; c.kin = false;
+      return true;
+    }
+    // clients: the host's cars as OrigCarPhysics bodies (network controller FUN_0041cce0: snap + 10 % blend, simulated with the host's flags between snapshots,
+    // colliding with everybody here); entries without the body state (old host) stay kinematic stand-ins. lag = one-way lag (s) for the extrapolation
+    applyRemote(list, lag) {
+      if (!this.rt) this.rt = new Map(); const seen = new Set(), N = global.YDNet;
+      for (const e of list) {
+        if (!Array.isArray(e)) continue; const [id, ti, x, y, z, yaw, speed, steer, brk] = e, q = N && e.length >= 31 ? e.slice(9, 31) : null;
         seen.add(id); let c = this.rt.get(id);
-        if (!c) { if (!this.tpl[ti]) continue; c = this.build(ti, id, x, y, z, yaw); this.rt.set(id, c); this.cars.push(c); }
-        c.tx = x; c.ty = y; c.tz = z; c.tyaw = yaw; c.speed = speed; c.tsteer = steer;
+        if (c && !c.phys !== !q) { this.scene.remove(c.obj); this.cars.splice(this.cars.indexOf(c), 1); c = null; }   // the host changed (old <-> new format): rebuild as a simulated body / a stand-in
+        if (!c) { if (!this.tpl[ti]) continue; c = this.build(ti, id, x, y, z, yaw, !!q); this.rt.set(id, c); this.cars.push(c); }
+        if (c.phys && q) { const inp = N.applyBody(c.phys, q, lag); if (inp) { c.inp = inp; c.braking = !!brk; continue; } }
+        c.tx = x; c.ty = y; c.tz = z; c.tyaw = yaw; c.braking = brk === undefined ? speed < c.speed - 0.05 || speed < 0.3 : !!brk; c.speed = speed; c.tsteer = steer;
       }
       for (const [id, c] of this.rt) if (!seen.has(id)) { this.scene.remove(c.obj); this.cars.splice(this.cars.indexOf(c), 1); this.rt.delete(id); }
     }
     updateRemote(dt) {
       const k = Math.min(1, dt * 10);
       for (const c of this.cars) {
+        if (c.phys) { if (!c.phys._init) continue; const ph = c.phys; c.yaw = ph.yaw; c.speed = ph.speed; c.steer = ph.steer; placeCar(c, dt, this.world); continue; }   // simulated copy
         if (c.tx === undefined) continue;
         const ox = c.pos.x, oz = c.pos.z; const ex = c.tx + Math.sin(c.tyaw) * c.speed * 0.05, ez = c.tz + Math.cos(c.tyaw) * c.speed * 0.05;   // dead-reckon along the heading
         if (Math.hypot(ex - c.pos.x, ez - c.pos.z) > 20) { c.pos.set(ex, c.ty, ez); c.yaw = c.tyaw; } else { c.pos.x += (ex - c.pos.x) * k; c.pos.z += (ez - c.pos.z) * k; c.pos.y += (c.ty - c.pos.y) * k; let dy = c.tyaw - c.yaw; dy = Math.atan2(Math.sin(dy), Math.cos(dy)); c.yaw += dy * k; }
         c.steer += (c.tsteer - c.steer) * k; c.vel.set((c.pos.x - ox) / Math.max(dt, 1e-4), 0, (c.pos.z - oz) / Math.max(dt, 1e-4));
         const rr = c.speed * dt / c.radius; for (const w of c.wheels) { w.spin.rotation.x += rr; w.pivot.rotation.y = w.front ? -c.steer : 0; }
         const gh = this.world.ground(c.pos.x, c.pos.z, c.pos.y + 0.5); c.obj.position.set(c.pos.x, (gh === null ? c.pos.y : gh) + c.radius + 0.02, c.pos.z); c.obj.rotation.set(0, c.yaw, 0);
-        if (c.pushX || c.pushZ) { c.pushX = c.pushZ = 0; }
       }
     }
     spawn(pp) {
@@ -221,117 +265,181 @@
         const t = Math.random() * q.length, s = {}; this.sample(q, t, s);
         if (s.y < -2) continue;   // never underground (metro: only the player)
         const d = Math.hypot(s.x - pp.x, s.z - pp.z); if (d < 60 || d > 200) continue;   // keep traffic close: far cars cost draw calls and are tiny anyway
-        if (this.cars.some(o => Math.hypot(o.pos.x - s.x, o.pos.z - s.z) < 9)) continue;   // never spawn inside another car
-        const ti = (Math.random() * this.tpl.length) | 0, c = this.build(ti, (this.nextId = (this.nextId || 0) + 1), s.x, s.y, s.z, s.yaw);
-        c.q = q; c.t = t; c.speed = 7 + Math.random() * 7; c.waited = 0;
+        if (this.cars.some(o => Math.hypot(o.pos.x - s.x, o.pos.z - s.z) < 9) || (this.others || []).some(o => Math.hypot(o.pos.x - s.x, o.pos.z - s.z) < 9)) continue;   // never spawn inside another car
+        const ti = (Math.random() * this.tpl.length) | 0, c = this.build(ti, (this.nextId = (this.nextId || 0) + 1), s.x, s.y, s.z, s.yaw, true);
+        c.q = q; c.t = t; c.nq = undefined;
         this.cars.push(c); return true;
       }
       return false;
     }
+    // ---- path helpers (FUN_00421710 projection, FUN_00421870 point `dist` further along the path and into the chosen next link; reconstructed) ----
+    nextPath(q) { const pa = this.world.cit.blocks[q.b].paths[q.p], nx = pa.next.length ? pa.next[(Math.random() * pa.next.length) | 0] : null, tg = nx === null ? null : this.linkTarget(q.b, nx); return (tg && this.pathAt(tg[0], tg[1])) || null; }
+    project(q, x, z, t0, win) {   // arc length of the point of q closest to (x, z), searched within t0 +- win
+      const c = this.cum(q), p = q.pts, n = c.length; let bt = t0, bd = 1e18;
+      for (let i = 0; i < n - 1; i++) {
+        if (c[i + 1] < t0 - win || c[i] > t0 + win) continue;
+        const ax = p[i * 3], az = p[i * 3 + 2], ex = p[i * 3 + 3] - ax, ez = p[i * 3 + 5] - az, l2 = ex * ex + ez * ez || 1e-9, f = clamp(((x - ax) * ex + (z - az) * ez) / l2, 0, 1);
+        const dx = ax + ex * f - x, dz = az + ez * f - z, d = dx * dx + dz * dz; if (d < bd) { bd = d; bt = c[i] + (c[i + 1] - c[i]) * f; }
+      }
+      return bt;
+    }
+    plen(q) { const c = this.cum(q); return c[c.length - 1]; }
+    pointAhead(c, dist, out) { let q = c.q, t = c.t + dist; if (t > this.plen(q) && c.nq) { t -= this.plen(q); q = c.nq; } this.sample(q, Math.min(t, this.plen(q)), out); return out; }
+    // every 15th frame: where the car is on its path, the 8 m / 40 m points (+0x84 / +0x78) and the car ahead (FUN_0041ae80); false = no path left
+    track(c, all) {
+      const ph = c.phys; c.t = this.project(c.q, ph.pos.x, ph.pos.z, c.t, 40);
+      if (c.nq === undefined) c.nq = this.nextPath(c.q);
+      if (c.t >= this.plen(c.q) - 0.3) {   // reached the end of the path: continue on the chosen link
+        if (!c.nq) return false;
+        c.q = c.nq; c.nq = this.nextPath(c.q); c.t = this.project(c.q, ph.pos.x, ph.pos.z, 0, 30);
+      }
+      c.t8 = this.pointAhead(c, 8, c.t8 || {}); c.t40 = this.pointAhead(c, 40, c.t40 || {});
+      c.ahead = this.carAhead(ph, all);
+      return true;
+    }
+    // FUN_0041ae80: the nearest body ahead along the horizontal heading within 20 m whose lateral (3D) offset is < 1.1*(maxX_A + maxX_B), closer than 10 m or
+    // closing at > 0.1 m/s with < 5 s to impact (players, rivals and other traffic alike)
+    carAhead(ph, all) {
+      const fx = Math.sin(ph.yaw), fz = Math.cos(ph.yaw), mx = b => (b.bnd ? b.bnd.max[0] : 0.95) * 1.1; let best = 20, hit = null;
+      for (const o of all) {
+        if (o === ph) continue; const dx = o.pos.x - ph.pos.x, dy = (o.pos.y || 0) - ph.pos.y, dz = o.pos.z - ph.pos.z, t = dx * fx + dz * fz; if (t <= 0 || t >= best) continue;
+        if (Math.hypot(dx - fx * t, dy, dz - fz * t) >= mx(o) + mx(ph)) continue;
+        if (t >= 10) { const cl = (ph.vel.x - o.vel.x) * fx + (ph.vel.z - o.vel.z) * fz; if (!(cl > 0.1 && t / cl < 5)) continue; best = t; }   // as in the asm only far hits shorten the search
+        hit = o;
+      }
+      return hit;
+    }
+    // traffic controller FUN_0041b880 (constants EXACT): once per frame before the physics steps, writes c.inp (digital flags for OrigCarPhysics direct mode).
+    // others: the player, rivals and remote cars. Returns nothing; cars without a path left are removed.
+    drive(dt, others) {
+      this.frameDt = dt;
+      if (this.remoteMode) { for (const c of this.cars) if (c.phys) c.near = (others || []).some(o => Math.abs(o.pos.x - c.pos.x) < 60 && Math.abs(o.pos.z - c.pos.z) < 60); return; }   // clients: the host's flags (applyRemote), only the step rate is chosen here
+      const all = this.colliders().concat(others || []), mz = b => (b.bnd ? b.bnd.max[2] : 2.2); this.frameDt = dt;
+      for (let i = this.cars.length - 1; i >= 0; i--) {
+        const c = this.cars[i], ph = c.phys; if (!ph) continue;
+        const inp = c.inp = { direct: true, throttle: 0, brake: 0, steer: 0, handbrake: false, shift: 0 };
+        const sp = ph.vel.length(), fx = Math.sin(ph.yaw), fz = Math.cos(ph.yaw), rx = -fz, rz = fx;   // driver's right in the mirrored space
+        const ang = (dx, dz) => Math.asin(clamp((dx * rx + dz * rz) / (Math.hypot(dx, dz) || 1), -1, 1));   // FUN_00472b90: > 0 = target on the right
+        const steerTo = a => { const s = -ph.steer; if (a < -0.01 && a < s) inp.steer = 1; if (a > 0.01 && s < a) inp.steer = -1; };   // left FUN_004107d0 / right FUN_004107c0 against the D3D steer (+0x180)
+        c.n++; c.near = (others || []).some(o => Math.abs(o.pos.x - ph.pos.x) < 60 && Math.abs(o.pos.z - ph.pos.z) < 60);
+        if (c.revT >= 0) {   // stuck rule: slot 0 (reverse) with gas for 2.0 s, steering by the 40 m point seen from behind; then 1st gear (slot 2) again
+          ph._idxCur = ph._idxTgt = 0; c.revT += dt;
+          if (c.revT > 2) { ph._idxCur = ph._idxTgt = 2; c.revT = -1; c.lowT = 0; continue; }
+          inp.throttle = 1; if (c.t40) { steerTo(ang(ph.pos.x - c.t40.x, ph.pos.z - c.t40.z)); c.t8 = Object.assign({}, c.t40); }
+          c.braking = false; continue;
+        }
+        if (ph._idxTgt === 1) ph._idxTgt = 2; if (ph._idxCur === 1) ph._idxCur = 2;   // never neutral
+        const P = ph.par, vref = P.maxRpm * 0.10471976 / ((P.ratios[ph._idxTgt] || 1e-6) * P.finalDrive) * P.rear.radius;   // own gearbox: up above 0.95, down below 0.35 of the gear's top speed
+        if (ph._idxCur > 1) { if (sp > 0.95 * vref) inp.shift = 1; else if (ph._idxTgt > 2 && sp < 0.35 * vref) inp.shift = -1; }
+        if (c.n % 15 === 1 && !this.track(c, all)) { this.scene.remove(c.obj); this.cars.splice(i, 1); continue; }
+        steerTo(ang(c.t8.x - ph.pos.x, c.t8.z - ph.pos.z));
+        let brake = false; const o = c.ahead;
+        if (o) {   // brake when the car ahead is closer than 1.3*(maxZ_A + maxZ_B), or 1.7 times that while it is slower than us
+          const d = Math.hypot(o.pos.x - ph.pos.x, (o.pos.y || 0) - ph.pos.y, o.pos.z - ph.pos.z), S = 1.3 * (mz(o) + mz(ph));
+          if (d < S || (d < 1.7 * S && o.vel.length() < sp)) brake = true;
+        }
+        { const dx = c.t40.x - ph.pos.x, dz = c.t40.z - ph.pos.z; if (Math.acos(clamp((dx * fx + dz * fz) / (Math.hypot(dx, dz) || 1), -1, 1)) > 0.3926991 && sp > 7) brake = true; }   // sharp turn ahead (> 22.5 deg) above 7 m/s
+        if (brake) inp.brake = 1; if (sp < c.cruise) inp.throttle = 1;   // gas only while below the cruise speed (and not braking: OrigCarPhysics gasFlag)
+        c.braking = brake;
+        if (sp < 1) { c.lowT += dt; if (c.lowT > 2.5) { c.revT = 0; c.lowT = 0; } } else c.lowT = 0;   // below 1 m/s for 2.5 s -> reverse mode
+      }
+    }
+    // after the physics steps: spawning, removal, visuals (simulated cars) / the host's cars (network clients)
     update(dt, pp) {
       if (this.remoteMode) { this.updateRemote(dt); return; }
       const players = this.players && this.players.length ? this.players : [pp], above = players.filter(p => p.y > -2.5);
       if (this.cars.length < this.max && above.length && Math.random() < dt * 3) this.spawn(above[(Math.random() * above.length) | 0]);
       for (let i = this.cars.length - 1; i >= 0; i--) {
-        const c = this.cars[i]; c.stun = Math.max(0, c.stun - dt);
-        if (c.pos.y < -2 || players.some(p => p.y < -2.5 && Math.hypot(c.pos.x - p.x, c.pos.z - p.z) < 120)) { this.scene.remove(c.obj); this.cars.splice(i, 1); continue; }   // metro: no traffic
-        // car following: slow down (to a stop) for any car (traffic, rivals, the player) right in front on the same lane, so traffic cars never drive through each other
-        if (c.cruise === undefined) c.cruise = c.speed;
-        let lim = c.cruise; const sy = Math.sin(c.yaw), cyw = Math.cos(c.yaw);
-        const look = (px, pz, vx, vz, prio) => {
-          const dx = px - c.pos.x, dz = pz - c.pos.z, ahead = dx * sy + dz * cyw, lat = Math.abs(dx * cyw - dz * sy);
-          if (ahead > 0 && ahead <= 26 && lat <= 2.7) { const along = Math.max(0, vx * sy + vz * cyw), gap = ahead - 5.0; lim = Math.min(lim, along + Math.max(0, gap) * 0.7); }
-          // crossing / merging traffic: anybody close in front or beside that has priority (older car, rival, the player) -> wait; the older car keeps going, so no deadlock
-          if (prio && ahead > -1.5 && Math.hypot(dx, dz) < 6.2 && lat < 3.2) lim = 0;
-        };
-        for (const o of this.cars) if (o !== c) look(o.pos.x, o.pos.z, o.vel.x, o.vel.z, o.id < c.id);
-        if (this.others) for (const o of this.others) look(o.pos.x, o.pos.z, o.vel.x, o.vel.z, true);
-        c.waited = lim < 0.3 ? c.waited + dt : 0; if (c.waited > 14) { this.scene.remove(c.obj); this.cars.splice(i, 1); continue; }   // stuck for a long time: remove
-        c.speed += clamp(lim - c.speed, -14 * dt, 3 * dt);
-        let sp = c.stun > 0 ? 0 : c.speed; c.t += sp * dt;
-        if (c.t >= c.q.length) { // follow a random outgoing link
-          const pa = this.world.cit.blocks[c.q.b].paths[c.q.p]; const nx = pa.next.length ? pa.next[(Math.random() * pa.next.length) | 0] : null;
-          const tgt = nx === null ? null : this.linkTarget(c.q.b, nx); const nq = tgt && this.pathAt(tgt[0], tgt[1]);
-          if (!nq) { this.scene.remove(c.obj); this.cars.splice(i, 1); continue; }
-          c.q = nq; c.t = 0;
-        }
-        // bicycle model + pure pursuit: the car drives along its own heading and steers towards a point further along the path,
-        // so turns are arcs (the body rotates, front wheels steer) instead of the car snapping to the polyline
-        const s = {}; this.sample(c.q, c.t, s);
-        const Ld = 4 + Math.abs(c.speed) * 0.35, tg = {}; this.sample(c.q, Math.min(c.q.length, c.t + Ld), tg);
-        let al = Math.atan2(tg.x - c.pos.x, tg.z - c.pos.z) - c.yaw; al = Math.atan2(Math.sin(al), Math.cos(al));
-        const spd = c.stun > 0 ? 0 : c.speed, want = c.stun > 0 ? 0 : clamp(Math.atan(2 * c.wheelBase * Math.sin(al) / Ld), -0.55, 0.55);
-        c.steer += (want - c.steer) * Math.min(1, dt * 6);
-        const yr = spd * Math.tan(c.steer) / c.wheelBase; c.yaw += yr * dt;
-        const ox = c.pos.x, oz = c.pos.z; c.pos.x += Math.sin(c.yaw) * spd * dt; c.pos.z += Math.cos(c.yaw) * spd * dt;
-        const ex = s.x - c.pos.x, ez = s.z - c.pos.z, ed = Math.hypot(ex, ez), k = Math.min(1, dt * 1.5);   // gentle pull back onto the lane
-        if (ed > 0.01) { c.pos.x += ex * k; c.pos.z += ez * k; }
-        if (ed > 6) c.t = Math.max(c.t - sp * dt, 0);   // fell behind the lane (sharp junction): let the path wait for the car
-        if (c.pushX || c.pushZ) { c.pos.x += c.pushX * dt; c.pos.z += c.pushZ * dt; const dk = Math.exp(-1.6 * dt); c.pushX *= dk; c.pushZ *= dk; if (Math.hypot(c.pushX, c.pushZ) < 0.05) c.pushX = c.pushZ = 0; }   // shoved by a collision
-        c.pos.y = s.y;
-        c.vel.set((c.pos.x - ox) / Math.max(dt, 1e-4), 0, (c.pos.z - oz) / Math.max(dt, 1e-4)); if (c.stun > 0) c.vel.set(0, 0, 0);
-        { const rr = (c.stun > 0 ? 0 : c.speed) * dt / c.radius; for (const w of c.wheels) { w.spin.rotation.x += rr; w.pivot.rotation.y = w.front ? -c.steer : 0; } }
-        s.x = c.pos.x; s.z = c.pos.z; s.yaw = c.yaw;
-        const gh = this.world.ground(s.x, s.z, s.y + 0.5); c.obj.position.set(s.x, (gh === null ? s.y : gh) + c.radius + 0.02, s.z);
-        c.obj.rotation.set(0, s.yaw, 0);
-        if (!players.some(p => Math.hypot(s.x - p.x, s.z - p.z) < 260)) { this.scene.remove(c.obj); this.cars.splice(i, 1); }
+        const c = this.cars[i], ph = c.phys; if (!ph) continue;
+        c.yaw = ph.yaw; c.speed = ph.speed; c.steer = ph.steer;
+        const far = !players.some(p => Math.hypot(c.pos.x - p.x, c.pos.z - p.z) < 260), stuck = (c.waited = Math.abs(c.speed) < 0.3 ? c.waited + dt : 0) > 30 && !players.some(p => Math.hypot(c.pos.x - p.x, c.pos.z - p.z) < 50);
+        if (far || stuck || !isFinite(c.pos.x + c.pos.z) || c.pos.y < -2 || players.some(p => p.y < -2.5 && Math.hypot(c.pos.x - p.x, c.pos.z - p.z) < 120)) { this.scene.remove(c.obj); this.cars.splice(i, 1); continue; }   // metro: no traffic; stuck > 30 s out of sight (not in the original: it keeps them until the block unloads)
+        placeCar(c, dt, this.world);
       }
     }
   }
 
-  // ---------- car vs car collisions (2 circles each) ----------
-  // The original (FUN_0041f900) tests the body corners and edge midpoints of one car against the other car's box and separates the two along the shortest way
-  // (shares by mass), then applies the soft contact impulse at the contact point. Here: exact oriented-rectangle test (separating axis, car footprint 1.9 x 4.4 m)
-  // -> minimum translation axis and penetration; contact point = the deepest corner.
-  const HW = 0.95, HL = 2.2;
+  // ---------- car vs car collisions ----------
+  // FUN_004231c0 broad phase: a car's world AABB (8 box corners) grown by (0.3, 1.0, 0.3) against every other car's; each overlapping pair is resolved from
+  // BOTH cars' updates (YDPhysOrig.collideCars(A, B) tests B's points in A's box, then (B, A)). Bodies: OrigCarPhysics or kinematic {pos, vel, yaw, mass, bnd}.
   function collideBodies(bodies, dt) {
-    const PH = global.YDPhysOrig, step = dt || 0.008;
+    const PH = global.YDPhysOrig; if (!PH || !PH.collideCars) return;
+    const bb = bodies.map(b => PH.carAABB(b));
     for (let i = 0; i < bodies.length; i++) for (let j = i + 1; j < bodies.length; j++) {
-      const a = bodies[i], b = bodies[j];
-      if (Math.abs(a.pos.x - b.pos.x) > 7 || Math.abs(a.pos.z - b.pos.z) > 7) continue;
-      if (a.kin && b.kin) continue;
-      const fa = [Math.sin(a.yaw), Math.cos(a.yaw)], ra = [fa[1], -fa[0]], fb = [Math.sin(b.yaw), Math.cos(b.yaw)], rb = [fb[1], -fb[0]];
-      const dx = a.pos.x - b.pos.x, dz = a.pos.z - b.pos.z;
-      let best = 1e9, nx = 0, nz = 0, owner = 0;
-      const axes = [[ra, HW, 0], [fa, HL, 0], [rb, HW, 1], [fb, HL, 1]];
-      let sep = false;
-      for (const [ax, , who] of axes) {
-        const pa = Math.abs(ax[0] * ra[0] + ax[1] * ra[1]) * HW + Math.abs(ax[0] * fa[0] + ax[1] * fa[1]) * HL;   // projection radius of a on this axis
-        const pb = Math.abs(ax[0] * rb[0] + ax[1] * rb[1]) * HW + Math.abs(ax[0] * fb[0] + ax[1] * fb[1]) * HL;
-        const d = dx * ax[0] + dz * ax[1], ov = pa + pb - Math.abs(d);
-        if (ov <= 0) { sep = true; break; }
-        if (ov < best) { best = ov; const sg = d >= 0 ? 1 : -1; nx = ax[0] * sg; nz = ax[1] * sg; owner = who; }
-      }
-      if (sep) continue;
-      // contact point: the corner of the rectangle that penetrates deepest (opposite to the normal)
-      const rect = owner === 0 ? b : a, rr = owner === 0 ? rb : ra, ff = owner === 0 ? fb : fa, sgn = owner === 0 ? -1 : 1;
-      let cx = rect.pos.x, cz = rect.pos.z, deep = 1e9;
-      for (const sx of [-1, 1]) for (const sl of [-1, 1]) {
-        const px = rect.pos.x + rr[0] * HW * sx + ff[0] * HL * sl, pz = rect.pos.z + rr[1] * HW * sx + ff[1] * HL * sl, d2 = (px * nx + pz * nz) * sgn;
-        if (d2 < deep) { deep = d2; cx = px; cz = pz; }
-      }
-      const cy = ((a.pos.y || 0) + (b.pos.y || 0)) / 2;
-      if (a.kin || b.kin) {
-        // traffic cars follow their lane; they hesitate briefly and are shoved by the momentum they receive
-        const kin = a.kin ? a : b; kin.stun = 0.25;
-        if (PH) {
-          if (kin.mass === undefined) kin.mass = 1300;
-          const vx = kin.vel.x, vz = kin.vel.z; PH.resolveCarCollision(a, b, nx, nz, best, cx, cy, cz, { dt: step }); kin.vel.x = vx; kin.vel.z = vz;
-          const sg = a.kin ? 1 : -1, sx = nx * sg, sz = nz * sg, other = a.kin ? b : a, rel = Math.max(0, (other.vel.x - vx) * sx + (other.vel.z - vz) * sz);
-          kin.pushX = Math.max(-9, Math.min(9, (kin.pushX || 0) + sx * rel * 0.02)); kin.pushZ = Math.max(-9, Math.min(9, (kin.pushZ || 0) + sz * rel * 0.02));
-        }
-      } else if (PH) PH.resolveCarCollision(a, b, nx, nz, best, cx, cy, cz, { dt: step });
-      else { a.pos.x += nx * best / 2; a.pos.z += nz * best / 2; b.pos.x -= nx * best / 2; b.pos.z -= nz * best / 2; }
+      const A = bb[i], B = bb[j];
+      if (A[0] - 0.3 > B[3] || A[3] + 0.3 < B[0] || A[1] - 1 > B[4] || A[4] + 1 < B[1] || A[2] - 0.3 > B[5] || A[5] + 0.3 < B[2]) continue;
+      PH.collideCars(bodies[i], bodies[j], dt || 1 / 60); PH.collideCars(bodies[j], bodies[i], dt || 1 / 60);
     }
   }
 
   // ---------- minimap ----------
-  // Minimap (FUN_00425530): a square panel in the top-left corner, NDC (-1,-1) 0.4 x 0.533 = 205x205 px of a 1024x768 screen,
-  // map rotating with the car (up = heading), car markers as dots.  (The original draws the 540x540 `map.dds` road sketch under
-  // the markers; my road polylines come from the decoded path network so markers always line up with the roads.)
+  // As the original: FUN_00428c80 builds the map once per game, FUN_00425530 draws it. (The 'map' material = map.dds is only looked up by
+  // FUN_00418230 and never drawn; the road sketch is drawn with GDI from the path network.)
+  // Build: 512x512 R5G6B5 surface, black; each path with flags == 0x20000000 as ONE straight line first->last point, pen 6 RGB(150,150,255);
+  //   flags == 0x80000000 the same, pen 8 RGB(200,200,200) (0x40000000 paths are not drawn); race (route): pen 8 RGB(180,100,100) through the
+  //   first points of route paths 1..n-1,0 (the 0->1 piece is missing in the original too); Ellipse +-6 px, pen 10 RGB(255,190,70), white
+  //   default brush, around the last point of the track's start path. Texel = (x*0.19692+256, 256-z*0.19692), original x (port x = -x): 2600 m.
+  // Draw: box sprite NDC (-1,-1) 0.4 x 0.533 colour 0x50000000; viewport 20% x 26.7% of the screen (205x205 at 1024x768); ortho window
+  //   zoom x zoom map units (minimap+0x138: 0.4 at start, numpad + / - held: -/+1 per s, 0.11..1.2, FUN_00425ac0/FUN_00425a90), eye (x,z)/2600,
+  //   up = car heading; the map is the unit quad +-0.5 (vertex buffer dev+0x2c68: uv = (X+0.5, 0.5-Y)), blend SRCCOLOR/INVSRCCOLOR (black = clear).
+  //   Dots: material carPoint (point.dds, 8x8 disc), quad 0.07*zoom (14 px) at the player, then the other 7 racers / players (no traffic):
+  //   paint colour (car+0x1e0); Gogh & Milica: robber (0,0.9,0), busted 0.5 grey, cop blue, siren on red while frac(time) > 0.5; a robber
+  //   only sees cars within 150 m. Without the path flags or point.dds the older polyline map below (drawOld) is used.
+  const mkCanvas = (w, h) => Object.assign(document.createElement('canvas'), { width: w, height: h });
   class Minimap {
-    constructor(canvas) { this.c = canvas; this.g = canvas.getContext('2d'); this.R = 210; canvas.width = 205; canvas.height = 205; }
-    draw(world, ph, race, ais, traffic) {
+    constructor(canvas) { this.c = canvas; this.g = canvas.getContext('2d'); this.zoom = 0.4; canvas.width = 205; canvas.height = 205; this.tex = null; this.pt = null; this.tints = new Map(); }
+    get R() { return this.zoom * 1300; }   // half the window in metres
+    set R(v) { this.zoom = Math.max(0.11, Math.min(1.2, v / 1300)); }
+    zoomBy(d) { this.zoom = Math.max(0.11, Math.min(1.2, this.zoom + d)); }
+    build(world, trc, point) {   // FUN_00428c80 (trc = race track or null; point = decoded point.dds {width, height, data})
+      const blocks = world && world.cit && world.cit.blocks; if (!blocks || !point || !blocks.some(b => b.paths.some(p => p.flags !== undefined))) return false;
+      const S = 512 / 2600, c = mkCanvas(512, 512), g = c.getContext('2d'), X = x => Math.trunc(x * S + 256) + 0.5, Y = z => Math.trunc(256 - z * S) + 0.5;
+      g.fillStyle = '#000'; g.fillRect(0, 0, 512, 512); g.lineCap = g.lineJoin = 'round';
+      const pen = (w, col, flag) => { g.lineWidth = w; g.strokeStyle = col; g.beginPath(); for (const b of blocks) for (const p of b.paths) { if (p.flags !== flag || p.pts.length < 6) continue; const n = p.pts.length; g.moveTo(X(p.pts[0]), Y(p.pts[2])); g.lineTo(X(p.pts[n - 3]), Y(p.pts[n - 1])); } g.stroke(); };
+      pen(6, 'rgb(150,150,255)', 0x20000000); pen(8, 'rgb(200,200,200)', 0x80000000);
+      const path = bp => blocks[bp[0]] && blocks[bp[0]].paths[bp[1]];
+      if (trc && trc.segs && trc.segs.length) {
+        const n = trc.segs.length; g.lineWidth = 8; g.strokeStyle = 'rgb(180,100,100)'; g.beginPath(); let first = true;
+        for (let i = 1; i <= n; i++) { const pa = path(trc.segs[i % n]); if (!pa) continue; const x = X(pa.pts[0]), y = Y(pa.pts[2]); if (first) g.moveTo(x, y); else g.lineTo(x, y); first = false; }
+        g.stroke();
+        const sp = path([trc.startBlock, trc.startPath]);
+        if (sp) { const n3 = sp.pts.length, x = sp.pts[n3 - 3] * S + 256, y = 256 - sp.pts[n3 - 1] * S; g.beginPath(); g.ellipse(x, y, 6, 6, 0, 0, TAU); g.fillStyle = '#fff'; g.fill(); g.lineWidth = 10; g.strokeStyle = 'rgb(255,190,70)'; g.stroke(); }
+      }
+      // R5G6B5, then SRCCOLOR/INVSRCCOLOR (out = T*T + dst*(1-T) per channel) as one canvas alpha: a = max(T), colour T*T/a (exact on grey texels and on the strongest channel)
+      const id = g.getImageData(0, 0, 512, 512), d = id.data;
+      for (let i = 0; i < d.length; i += 4) {
+        const r = (d[i] & 0xf8) | d[i] >> 5, gg = (d[i + 1] & 0xfc) | d[i + 1] >> 6, bb = (d[i + 2] & 0xf8) | d[i + 2] >> 5, a = Math.max(r, gg, bb);
+        if (a < 1) { d[i + 3] = 0; continue; }
+        d[i] = Math.min(255, r * r / a); d[i + 1] = Math.min(255, gg * gg / a); d[i + 2] = Math.min(255, bb * bb / a); d[i + 3] = a;
+      }
+      g.putImageData(id, 0, 0); this.tex = c;
+      const pc = mkCanvas(point.width, point.height); pc.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(point.data), point.width, point.height), 0, 0); this.pt = pc;
+      return true;
+    }
+    tinted(argb) {   // carPoint: emissive = the dot colour (FUN_004069c0), times the white disc texture
+      let t = this.tints.get(argb); if (t) return t;
+      t = mkCanvas(this.pt.width, this.pt.height); const g = t.getContext('2d'); g.drawImage(this.pt, 0, 0);
+      g.globalCompositeOperation = 'multiply'; g.fillStyle = '#' + (argb & 0xffffff).toString(16).padStart(6, '0'); g.fillRect(0, 0, t.width, t.height);
+      g.globalCompositeOperation = 'destination-in'; g.drawImage(this.pt, 0, 0); this.tints.set(argb, t); return t;
+    }
+    // o: { ents: [player, ...others] ({phys, car, team, busted}), color(e) -> ARGB paint, gm: Gogh & Milica, siren(e), t: seconds }
+    draw(world, ph, race, ais, traffic, o) {
+      if (!this.tex || !o) return this.drawOld(world, ph, race, ais, traffic);
+      const g = this.g, W = this.c.width, S = 512 / 2600, k = W / (this.zoom * 512), cs = Math.cos(ph.yaw) * k, sn = Math.sin(ph.yaw) * k;
+      const uc = 256 - ph.pos.x * S, vc = 256 - ph.pos.z * S, e0 = W / 2 - (cs * uc - sn * vc), f0 = W / 2 - (sn * uc + cs * vc);   // port x = -original x
+      g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, W, W); g.fillStyle = 'rgba(0,0,0,0.3137)'; g.fillRect(0, 0, W, W);
+      g.imageSmoothingEnabled = true; g.setTransform(cs, sn, -sn, cs, e0, f0); g.drawImage(this.tex, 0, 0); g.setTransform(1, 0, 0, 1, 0, 0);
+      const me = o.ents[0], robberView = o.gm && me && me.team === 'g', sz = 0.07 * W;
+      for (const e of o.ents) {
+        if (!e || !e.phys) continue; const p = e.phys.pos;
+        if (robberView && e !== me && Math.hypot(p.x - me.phys.pos.x, p.y - me.phys.pos.y, p.z - me.phys.pos.z) >= 150) continue;
+        const col = !o.gm ? o.color(e) : e.team === 'g' ? (e.busted ? 0xff808080 : 0xff00e600) : (o.siren(e) && o.t - Math.floor(o.t) > 0.5 ? 0xffff0000 : 0xff0000ff);
+        const u = 256 - p.x * S, v = 256 - p.z * S, x = cs * u - sn * v + e0, y = sn * u + cs * v + f0;
+        if (x < -sz || y < -sz || x > W + sz || y > W + sz) continue;
+        g.drawImage(this.tinted(col >>> 0), x - sz / 2, y - sz / 2, sz, sz);
+      }
+    }
+    drawOld(world, ph, race, ais, traffic) {
       const g = this.g, W = this.c.width, H = this.c.height, cx = W / 2, cy = H / 2, sc = (W / 2) / this.R;
       const sy = Math.sin(ph.yaw), cyw = Math.cos(ph.yaw);
       const tx = (x, z) => { const dx = x - ph.pos.x, dz = z - ph.pos.z; return [cx + (dx * -cyw + dz * sy) * sc, cy - (dx * sy + dz * cyw) * sc]; };
@@ -359,27 +467,42 @@
   }
 
   // ---------- positional ambience (Sound/ambient.snd) ----------
+  // Ambient emitters (CIT types 7/10), as FUN_00420820 per emitter. SoundDef p[0] flags: bit31 loop, bit30 'name0..N-1.wav' variants, bit29 3D buffer;
+  // p[1] buffers (voices) or variants, p[2]/p[3] min/max distance, p[4] repeat interval. Without bit29 a def only gets a 2D buffer that the emitter never
+  // plays (the hay*/hayfm* radio loops are silent in the original too). Loops (fant1 fountain, getak1 water) play while the listener is within max;
+  // one-shots (Ptica = Ptica0..9 birds) start a random free variant every 3 s + rand*interval unless the last one still plays. Gain = min(1, min/d)
+  // (DirectSound3D rolloff 1), nothing beyond max. decode: WAV -> PCM (the archive has MS/IMA ADPCM); out: the Sound-volume node.
   class Ambience {
-    constructor(ctx, world, vfs) { this.ctx = ctx; this.world = world; this.vfs = vfs; this.bufs = new Map(); this.active = new Map(); this.timer = 0; this.ready = false; this.vol = 0.5; }
+    constructor(ctx, world, vfs, decode, out) { this.ctx = ctx; this.world = world; this.vfs = vfs; this.decode = decode; this.out = out || ctx.destination; this.defs = new Map(); this.st = []; this.t = 0; this.ready = false; }
     async init() {
       const files = YD.readBFX(await this.vfs.bytes('Sound/ambient.snd'));
-      for (const [name, data] of files) { try { this.bufs.set(name, await this.ctx.decodeAudioData(data.slice(0))); } catch (e) { /* skip undecodable */ } }
+      for (const e of this.world.emitters) {
+        if (this.defs.has(e.name)) continue; const d = { loop: (e.flags & 0x80000000) !== 0, bufs: [], end: [] }; this.defs.set(e.name, d);
+        if (!(e.flags & 0x20000000)) continue;
+        const vari = (e.flags & 0x40000000) !== 0, names = vari ? Array.from({ length: e.count }, (_, i) => e.name.replace(/\.wav$/, i + '.wav')) : [e.name];
+        for (const n of names) { const b = files.get(n); if (!b) continue; try { const buf = await this.ctx.decodeAudioData(this.decode ? this.decode(b) : b.slice(0)); for (let k = 0; k < (vari ? 1 : e.count); k++) d.bufs.push(buf); } catch (er) { console.warn('ambient ' + n, er); } }
+      }
       this.ready = true;
     }
-    update(dt, pp) {
-      if (!this.ready) return; this.timer -= dt; if (this.timer > 0) return; this.timer = 0.25;
-      const near = [];
-      this.world.emitters.forEach((e, i) => { const d = Math.hypot(e.x - pp.x, e.z - pp.z); if (d < e.max && this.bufs.has(e.name)) near.push([d, i]); });
-      near.sort((a, b) => a[0] - b[0]); const keep = new Set(near.slice(0, 5).map(n => n[1]));
-      for (const [i, a] of this.active) if (!keep.has(i)) { try { a.src.stop(); } catch (e) { } this.active.delete(i); }
-      for (const [d, i] of near.slice(0, 5)) {
-        const e = this.world.emitters[i]; const g = this.vol * Math.pow(1 - clamp((d - e.min) / (e.max - e.min), 0, 1), 1.5);
-        let a = this.active.get(i);
-        if (!a) { const src = this.ctx.createBufferSource(); src.buffer = this.bufs.get(e.name); src.loop = true; const gn = this.ctx.createGain(); gn.gain.value = 0; src.connect(gn).connect(this.ctx.destination); src.start(0, Math.random() * src.buffer.duration); a = { src, gn }; this.active.set(i, a); }
-        a.gn.gain.setTargetAtTime(g, this.ctx.currentTime, 0.2);
-      }
+    _play(d) {   // FUN_00408180(-1): a random buffer, the first free one if that is busy, none if all are busy
+      const now = this.ctx.currentTime; let i = Math.floor(Math.random() * d.bufs.length); if (d.end[i] > now) { i = d.bufs.findIndex((b, k) => !(d.end[k] > now)); if (i < 0) return null; }
+      const src = this.ctx.createBufferSource(), gn = this.ctx.createGain(); src.buffer = d.bufs[i]; src.loop = d.loop; gn.gain.value = 0; src.connect(gn).connect(this.out); src.start();
+      d.end[i] = d.loop ? Infinity : now + src.buffer.duration; return { src, gn, d, i, until: d.end[i] };
     }
-    stop() { for (const [, a] of this.active) { try { a.src.stop(); } catch (e) { } } this.active.clear(); }
+    _stop(s) { if (!s.h) return; try { s.h.src.stop(); } catch (e) { } if (s.h.d.end[s.h.i] === s.h.until) s.h.d.end[s.h.i] = 0; s.h = null; }   // a finished one-shot's buffer may already belong to another emitter
+    update(dt, L) {
+      if (!this.ready) return; const now = this.ctx.currentTime; this.t += dt;
+      this.world.emitters.forEach((e, k) => {
+        const d = this.defs.get(e.name); if (!d || !d.bufs.length) return;
+        const s = this.st[k] || (this.st[k] = { h: null, next: 0 }), dist = Math.hypot(e.x - L.x, e.y - L.y, e.z - L.z);
+        if (dist > e.max) { this._stop(s); return; }
+        if (s.h && !d.loop && now >= s.h.until) s.h = null;
+        if (d.loop) { if (!s.h) s.h = this._play(d); }
+        else if (this.t >= s.next) { s.next = this.t + Math.random() * e.every + 3; if (!s.h) s.h = this._play(d); }
+        if (s.h) s.h.gn.gain.value = Math.min(1, e.min / Math.max(dist, 1e-3));
+      });
+    }
+    stop() { for (const s of this.st) if (s) this._stop(s); }
   }
 
 
@@ -424,7 +547,7 @@
       for (const e of ents) {
         const ws = e.phys && e.phys.wheels; if (!ws || !e.car.wheels) continue;
         if (camPos && e.car.obj.position.distanceTo(camPos) > 120) continue;
-        for (let i = 0; i < 4 && i < ws.length; i++) {
+        for (let i = 0; i < 4 && i < ws.length && i < e.car.wheels.length; i++) {
           const w = ws[i], key = (e.id || e.name || 'p') + i;
           if (w.contact && w.slip > 0.35 && Math.abs(e.phys.speed || 0) > 1.5 || (w.contact && w.slip > 0.6 && Math.abs(e.phys.speed || 0) > 0.5)) {
             const v = new THREE.Vector3(); e.car.wheels[i].pivot.getWorldPosition(v);
@@ -443,5 +566,18 @@
     }
   }
 
-  global.YDSim = { TyreFx, updateLamps, makeShadow, updateShadow, placeCar, buildRoute, parseTrc, AIDriver, Race, Traffic, collideBodies, Minimap, Ambience, nearest, heading };
+  // ---- collision sparks (FUN_0041a4f0 -> FUN_00419e50): a ring of 50 entries; each hit that plays a crash sound places 12 'boundparticle' (bparticle.tga)
+  // quads at P + (0.5 - rand)*0.5 per axis that stay for 0.25 s (FUN_0041a150). The original stretches them with the camera speed (FUN_00419f60, not ported).
+  class Sparks {
+    constructor(scene, tex) {
+      this.N = 50; this.age = new Float32Array(this.N); this.i = 0; const pos = this.pos = new Float32Array(this.N * 12 * 3).fill(-1e5), g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e9);
+      this.pts = new THREE.Points(g, new THREE.PointsMaterial({ map: tex || null, color: tex ? 0xffffff : 0xffd070, size: 0.3, sizeAttenuation: true, transparent: true, depthWrite: false, alphaTest: 0.05 }));
+      this.pts.frustumCulled = false; this.pts.renderOrder = 3; scene.add(this.pts);
+    }
+    add(P) { const k = this.i; this.i = (this.i + 1) % this.N; this.age[k] = 0.25; for (let j = 0; j < 12; j++) { const o = (k * 12 + j) * 3; this.pos[o] = P.x + (0.5 - Math.random()) * 0.5; this.pos[o + 1] = (P.y || 0) + (0.5 - Math.random()) * 0.5; this.pos[o + 2] = P.z + (0.5 - Math.random()) * 0.5; } this.pts.geometry.attributes.position.needsUpdate = true; }
+    update(dt) { let ch = false; for (let k = 0; k < this.N; k++) if (this.age[k] > 0 && (this.age[k] -= dt) <= 0) { this.pos.fill(-1e5, k * 36, k * 36 + 36); ch = true; } if (ch) this.pts.geometry.attributes.position.needsUpdate = true; }
+  }
+
+  global.YDSim = { Sparks, TyreFx, updateLamps, makeShadow, updateShadow, placeCar, buildRoute, parseTrc, AIDriver, Race, Traffic, collideBodies, Minimap, Ambience, nearest, heading };
 })(window);

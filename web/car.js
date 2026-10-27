@@ -39,6 +39,7 @@
     if (parts.bound) parts.bound.visible = false;
 
     // paint: exact rule from the binary (render-orig.js): materials whose raw data has a non-zero byte at 0x54
+    if (carcol && carcol.length) colorIdx = ((colorIdx | 0) % carcol.length + carcol.length) % carcol.length;   // saved/remote index from the old 16-colour list wraps into the 10
     if (carcol && carcol[colorIdx]) {
       if (global.YDRender) {
         const idx = await global.YDRender.paintMaterialIndices(vfs, folder);
@@ -86,7 +87,11 @@
     // mesh data bounds -> ground offset (lowest body point relative to wheel centre)
     // the original draws the glass (lusamut) solid black in the real game and in the menu preview (verified on an in-game capture)
     if (parts.lusamut) parts.lusamut.traverse(o => { if (o.isMesh) (Array.isArray(o.material) ? o.material : [o.material]).forEach(mt => { if (mt && mt.transparent) { mt.transparent = false; mt.opacity = 1; mt.color.set(0x000000); if (mt.emissive) mt.emissive.set(0x000000); mt.depthWrite = true; mt.needsUpdate = true; } }); });
-    return { obj: car, parts, wheels, par, parOrig, camBytes: Array.from(new Uint8Array(parBuf, 0x1b8, 4)), materials: built.materials, radius, descs: built.descs, folder, groundY: -radius };
+    // collision box = the car's own 'bound' mesh (car-local: half width/length, centre offset along z, height range above the car origin)
+    let box = null; if (parts.bound) { car.updateMatrixWorld(true); const bb = new THREE.Box3().setFromObject(parts.bound); if (!bb.isEmpty() && bb.max.z - bb.min.z > 1) box = { hw: (bb.max.x - bb.min.x) / 2, hl: (bb.max.z - bb.min.z) / 2, oz: (bb.max.z + bb.min.z) / 2, y0: bb.min.y, y1: bb.max.y }; }
+    // car-car box of the original (FUN_0041ff60: welded vertex list of 'bound' + D3DXComputeBoundingBox, frame matrices NOT applied): raw vertex AABB in the car's D3D frame
+    let bnd = null; if (parts.bound) { const mn = [1e9, 1e9, 1e9], mx = [-1e9, -1e9, -1e9]; parts.bound.traverse(o => { const a = o.isMesh && o.geometry.attributes.position; if (a) for (let i = 0; i < a.count; i++) for (let k = 0; k < 3; k++) { const v = a.array[i * a.itemSize + k]; if (v < mn[k]) mn[k] = v; if (v > mx[k]) mx[k] = v; } }); if (mx[2] - mn[2] > 1) bnd = { min: mn, max: mx }; }
+    return { obj: car, parts, wheels, par, parOrig, box, bnd, camBytes: Array.from(new Uint8Array(parBuf, 0x1b8, 4)), materials: built.materials, radius, descs: built.descs, folder, groundY: -radius };
   }
 
   // ---------- simple arcade-sim driving model ----------
@@ -184,11 +189,11 @@
 
   // physics factory: the reverse-engineered original model (physics-orig.js), or the arcade model with ?phys=arcade
   function makePhysics(car, world) {
-    const O = global.YDPhysOrig;
+    const O = global.YDPhysOrig; let ph;
     if (O && car.parOrig && new URLSearchParams(location.search).get('phys') !== 'arcade') {
-      return new O.OrigCarPhysics(car.parOrig, car.radius, { groundFn: world && world.ground ? (x, z, y) => world.ground(x, z, y) : null, rayFn: world && world.rayCast, tunnelFn: world && world.inTunnel });
-    }
-    return new CarPhysics(car.par, car.radius);
+      ph = new O.OrigCarPhysics(car.parOrig, car.radius, { groundFn: world && world.ground ? (x, z, y) => world.ground(x, z, y) : null });   // wheel rays: world.wheelQuery (physics-orig reads window.WORLD)
+    } else ph = new CarPhysics(car.par, car.radius);
+    ph.box = car.box; ph.bnd = car.bnd; ph.boxLift = car.radius + 0.02; return ph;   // car-car collision box (physics-orig collideCars: bnd, raw D3D bound AABB)
   }
 
   global.YDCar = { readPar, loadCar, CarPhysics, makePhysics };

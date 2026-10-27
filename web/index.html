@@ -61,10 +61,10 @@ button.alt{background:#232b3b;color:var(--fg);border:1px solid #38445a;margin-to
   <div id="info"></div>
   <div id="race" style="position:absolute;left:50%;top:14px;transform:translateX(-50%);text-align:center;font-size:20px;font-weight:700;text-shadow:0 2px 6px #000;display:none"><span id="rpos"></span> &nbsp; <span id="rlap"></span> &nbsp; <span id="rtime"></span></div>
   <div id="count" style="position:absolute;left:0;right:0;top:28%;text-align:center;font-size:120px;font-weight:900;color:#f2b705;text-shadow:0 4px 20px #000;display:none"></div>
-  <canvas id="minimap" width="205" height="205" style="position:absolute;left:0;top:0;display:none"></canvas><div id="song" style="position:absolute;left:18px;bottom:34px"></div>
+  <canvas id="minimap" width="205" height="205" style="position:absolute;left:0;top:0;display:none"></canvas><div id="song" style="position:absolute;left:18px;bottom:34px;display:none"></div>
   <div id="dash"><div><span id="speed">0</span><span id="kmh">km/h</span><span id="gear">1</span></div><div id="rpm"><div id="rpmfill"></div></div></div>
-  <div id="menubtn" style="position:absolute;right:18px;top:14px;pointer-events:auto;cursor:pointer;background:#000a;padding:6px 12px;border-radius:8px" onclick="window.dispatchEvent(new KeyboardEvent('keydown',{code:'Escape'}))">☰ Menu (Esc)</div>
-  <div id="help">↑ gas · ↓ brake · ←/→ steer · Space handbrake · A/Z shift · C camera · B look back · H horn · N next / P previous song · [ ] music volume · drop MP3s to add · +/- map zoom · M siren (police) · U mute music · F3 performance · R reset</div>
+  <div id="menubtn" style="display:none;position:absolute;right:18px;top:calc(min(100vw, 100vh) * 0.0625 + 8px);pointer-events:auto;cursor:pointer;background:#000a;padding:6px 12px;border-radius:8px;font-size:22px" onclick="window.dispatchEvent(new KeyboardEvent('keydown',{code:'Escape'}))">☰</div>
+  <div id="help" style="display:none">↑ gas · ↓ brake · ←/→ steer · Space handbrake · A/Z shift · C camera · B look back · H horn · N next / P previous song · [ ] music volume · drop MP3s to add · +/- map zoom · M siren (police) · U mute music · F3 performance · R reset</div>
 </div>
 <div id="touch">
 <!-- left: STOP (Space = handbrake) + horn / camera -->
@@ -93,6 +93,7 @@ button.alt{background:#232b3b;color:var(--fg);border:1px solid #38445a;margin-to
 <script src="car.js"></script>
 <script src="world.js"></script>
 <script src="sim.js"></script>
+<script src="carfx.js"></script>
 <script src="ui-orig.js"></script>
 <script src="net.js"></script>
 <script src="game.js"></script>

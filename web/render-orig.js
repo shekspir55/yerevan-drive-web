@@ -24,8 +24,8 @@
     // reflection factor on cars: tfactor alpha = clamp01((r/d - 0.35 S)/(0.65 S)) * 60 / 255
     REFLECT_MAX: 60 / 255,
     // chase camera (FUN_00417ad0)
-    CAM: { follow: [5.0, 8.0], height: [2.0, 2.5], rate: 0.8, minLen: 3.2, driftK: 0.5, radius: 0.96, losDist: 3.0, shake: 1 / 6000, shakeCapSpeed: 70,
-           startBack: 7, startUp: 2, interiorUp: 0.1, interiorFwd: 0.1 /* par bytes * 0.1 */, behindFwdScale: 0.1 },
+    CAM: { follow: [5.0, 8.0], maxLen: [8.0, 12.0], height: [2.0, 2.5], rate: 0.8, minLen: 3.2, driftK: 0.5, radius: 0.96, box: 1.2, losDist: 3.0, shake: 1 / 6000, shakeCapSpeed: 70, velClamp: 0.05,
+           startBack: 7, startUp: 2, parScale: 0.1 /* par bytes 0x1b8..0x1bb * 0.1 */, backUp: 1, backFwd: 6 /* look-back guard for cars without camera bytes */, orbitR: 9, orbitRate: 0.2 },
   };
 
   // ------------------------------------------------------------------ D3D enum helpers
@@ -51,6 +51,7 @@
   // three.js material that follows the exact D3D state mapping of FUN_00406740
   function makeMaterial(raw, map, opts) {
     opts = opts || {};
+    if (global.YD && YD.flagMaterial) { const m = YD.flagMaterial(raw, map || null); m.userData.raw = raw; return m; }   // single mapping, formats.js flagMaterial
     const lit = !!(raw.flags & MF.LIGHTING);
     const Cls = lit ? T.MeshLambertMaterial : T.MeshBasicMaterial;
     const m = new Cls({ map: map || null, color: new T.Color(raw.diffuse[0], raw.diffuse[1], raw.diffuse[2]) });
@@ -169,6 +170,7 @@
   // (BLENDFACTORALPHA), so a bright body mixes as 1.0*(1-f) + env*f (measured on the real game: white G500 = 0.82); three.js would mix the unclamped value.
   function envShader(mat) {
     const fx = mat.userData.ydNormalFlip;
+    if (global.YD && YD.ydHooks) { mat.userData.ydEnv = 1; YD.ydHooks(mat); mat.needsUpdate = true; return; }   // shared patch (keeps the lighting clamp / specular of formats.js flag materials)
     mat.onBeforeCompile = shader => {
       if (fx !== undefined) shader.vertexShader = shader.vertexShader.replace('#include <envmap_vertex>', '#ifdef USE_ENVMAP\n vReflect = transformedNormal * vec3(' + fx.toFixed(1) + ', 1.0, 1.0);\n#endif');
       shader.fragmentShader = shader.fragmentShader.replace('#include <envmap_fragment>', 'outgoingLight = min(outgoingLight, vec3(1.0));\n#include <envmap_fragment>');
@@ -214,49 +216,83 @@
     }
   }
 
-  // ------------------------------------------------------------------ chase camera (FUN_00417ad0 + FUN_00417630)
+  // ------------------------------------------------------------------ chase camera (camera object DAT_004b1188: FUN_00417240 follow, FUN_00417ad0 update, FUN_00417630 view, FUN_004179e0 free)
+  // closest point of a triangle (FUN_00416d40) and a double-sided ray/triangle test (D3DXIntersectTri, FUN_0043e235); t = 9 numbers, three space
+  function closestOnTri(p, t, out) {
+    const ax = t[0], ay = t[1], az = t[2], abx = t[3] - ax, aby = t[4] - ay, abz = t[5] - az, acx = t[6] - ax, acy = t[7] - ay, acz = t[8] - az, apx = p.x - ax, apy = p.y - ay, apz = p.z - az;
+    const d1 = abx * apx + aby * apy + abz * apz, d2 = acx * apx + acy * apy + acz * apz; if (d1 <= 0 && d2 <= 0) return out.set(ax, ay, az);
+    const bpx = p.x - t[3], bpy = p.y - t[4], bpz = p.z - t[5], d3 = abx * bpx + aby * bpy + abz * bpz, d4 = acx * bpx + acy * bpy + acz * bpz; if (d3 >= 0 && d4 <= d3) return out.set(t[3], t[4], t[5]);
+    const vc = d1 * d4 - d3 * d2; if (vc <= 0 && d1 >= 0 && d3 <= 0) { const v = d1 / (d1 - d3); return out.set(ax + abx * v, ay + aby * v, az + abz * v); }
+    const cpx = p.x - t[6], cpy = p.y - t[7], cpz = p.z - t[8], d5 = abx * cpx + aby * cpy + abz * cpz, d6 = acx * cpx + acy * cpy + acz * cpz; if (d6 >= 0 && d5 <= d6) return out.set(t[6], t[7], t[8]);
+    const vb = d5 * d2 - d1 * d6; if (vb <= 0 && d2 >= 0 && d6 <= 0) { const w = d2 / (d2 - d6); return out.set(ax + acx * w, ay + acy * w, az + acz * w); }
+    const va = d3 * d6 - d5 * d4; if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) { const w = (d4 - d3) / ((d4 - d3) + (d5 - d6)); return out.set(t[3] + (t[6] - t[3]) * w, t[4] + (t[7] - t[4]) * w, t[5] + (t[8] - t[5]) * w); }
+    const den = 1 / (va + vb + vc), v = vb * den, w = vc * den; return out.set(ax + abx * v + acx * w, ay + aby * v + acy * w, az + abz * v + acz * w);
+  }
+  function rayTri(o, d, t) {
+    const e1x = t[3] - t[0], e1y = t[4] - t[1], e1z = t[5] - t[2], e2x = t[6] - t[0], e2y = t[7] - t[1], e2z = t[8] - t[2];
+    const px = d.y * e2z - d.z * e2y, py = d.z * e2x - d.x * e2z, pz = d.x * e2y - d.y * e2x, det = e1x * px + e1y * py + e1z * pz; if (Math.abs(det) < 1e-10) return -1;
+    const inv = 1 / det, tx = o.x - t[0], ty = o.y - t[1], tz = o.z - t[2], u = (tx * px + ty * py + tz * pz) * inv; if (u < 0 || u > 1) return -1;
+    const qx = ty * e1z - tz * e1y, qy = tz * e1x - tx * e1z, qz = tx * e1y - ty * e1x, v = (d.x * qx + d.y * qy + d.z * qz) * inv; if (v < 0 || u + v > 1) return -1;
+    const s = (e2x * qx + e2y * qy + e2z * qz) * inv; return s >= 0 ? s : -1;
+  }
+  const _v1 = new T.Vector3(), _v2 = new T.Vector3(), _v3 = new T.Vector3();
   class ChaseCamera {
-    constructor() { this.mode = 0; this.eye = new T.Vector3(); this.target = new T.Vector3(); this.up = new T.Vector3(0, 1, 0); this.vel = new T.Vector3(); this.prevEye = new T.Vector3(); this.init = false; this.lookBehind = false; }
-    // car: {pos, vel, up, fwd (unit, game space), par?: {camBytes:[a,b,c,d]}}; opts.collideEye(eye, radius)
-    reset(car) { // FUN_00417240: eye = pos - fwd*7 + up*2
-      this.eye.copy(car.pos).addScaledVector(car.fwd, -C.CAM.startBack).addScaledVector(car.up, C.CAM.startUp); this.prevEye.copy(this.eye); this.init = true;
+    constructor() { this.mode = 0; this.eye = new T.Vector3(); this.target = new T.Vector3(); this.up = new T.Vector3(0, 1, 0); this.vel = new T.Vector3(); this.prevEye = new T.Vector3(); this.init = false; this.lookBehind = false; this.free = false; this.saved = null; this.clock = 0; this.viewEye = new T.Vector3(); this.viewTarget = new T.Vector3(); }
+    // car: {pos, vel, up, fwd (unit, game space), par?: {camBytes:[a,b,c,d]}}
+    reset(car) { // FUN_00417240(car): mode 0, eye = pos - fwd*7 + up*2, target = pos + (0,2,0), up = car up, vel = car vel
+      this.mode = 0; this.eye.copy(car.pos).addScaledVector(car.fwd, -C.CAM.startBack).addScaledVector(car.up, C.CAM.startUp); this.prevEye.copy(this.eye);
+      this.target.set(car.pos.x, car.pos.y + C.CAM.height[0], car.pos.z); this.up.copy(car.up); this.vel.copy(car.vel); this.init = true;
     }
+    cycle() { this.mode = (this.mode + 1) % 3; }   // C (FUN_00417610): 0 -> 1 -> 2 -> 0
+    setFree(on) { // FUN_004179e0: pause / menus. On: save eye, target, up, vel; off: restore them exactly
+      on = !!on; if (on === this.free) return; this.free = on;
+      if (on) this.saved = [this.eye.clone(), this.target.clone(), this.up.clone(), this.vel.clone()];
+      else if (this.saved) { this.eye.copy(this.saved[0]); this.target.copy(this.saved[1]); this.up.copy(this.saved[2]); this.vel.copy(this.saved[3]); this.prevEye.copy(this.eye); }
+    }
+    // opts.tris(x0,y0,z0,x1,y1,z1) -> collision triangles of the blocks (eye +- 1.2 box); opts.noCollide skips it
     update(car, dt, camera, opts) {
       opts = opts || {}; if (!this.init) this.reset(car);
-      this.prevEye.copy(this.eye);
-      const cb = (car.par && car.par.camBytes) || [0, 0, 0, 0];
-      if (this.mode >= 2) { // interior / look-behind
-        const up = car.up;
-        if (this.lookBehind) { // DAT_004aaea0 != 0 variant: eye = pos + up*(1+b) + fwd*c, target = pos + up
-          this.target.copy(car.pos).add(up);
-          this.eye.copy(car.pos).addScaledVector(up, 1 + cb[2] * 0.1).addScaledVector(car.fwd, cb[3] * 0.1);
-        } else {            // eye = pos + up*A + fwd*B ; target = eye + fwd
-          this.eye.copy(car.pos).addScaledVector(up, cb[0] * 0.1).addScaledVector(car.fwd, cb[1] * 0.1);
-          this.target.copy(this.eye).add(car.fwd);
-        }
-        this.up.copy(up);
+      const K = C.CAM, eye = this.eye, tg = this.target; this.clock += dt; this.prevEye.copy(eye);
+      if (this.free) { // orbit around the frozen target at radius 9, height of the target (T = game clock * 0.2)
+        const k = dt * K.orbitRate, a = this.clock * K.orbitRate, ox = eye.x - tg.x, oy = eye.y - tg.y, oz = eye.z - tg.z;
+        eye.set(tg.x + ox + (-K.orbitR * Math.sin(a) - ox) * k, tg.y + oy - oy * k, tg.z + oz + (K.orbitR * Math.cos(a) - oz) * k);   // x mirrored
       } else {
-        const L = C.CAM.follow[this.mode], H = C.CAM.height[this.mode];
-        this.eye.addScaledVector(car.vel, dt * C.CAM.driftK);                         // eye drifts with half the car velocity
-        this.target.set(car.pos.x, car.pos.y + H, car.pos.z);                          // look-at point
-        const off = this.eye.clone().sub(this.target);
-        const h = new T.Vector3(car.fwd.x, 0, car.fwd.z).normalize();
-        const want = h.multiplyScalar(-L);
-        off.addScaledVector(want.sub(off), Math.min(1, dt * C.CAM.rate));             // exponential approach to "behind the car"
+        const L = K.follow[this.mode === 1 ? 1 : 0], Lmax = K.maxLen[this.mode === 1 ? 1 : 0], H = K.height[this.mode === 1 ? 1 : 0];   // mode 2 keeps the mode-0 chase running
+        eye.addScaledVector(car.vel, dt * K.driftK);                                    // eye drifts with half the car velocity
+        tg.set(car.pos.x, car.pos.y + H, car.pos.z);                                     // look-at point (world Y)
+        const off = _v1.copy(eye).sub(tg), hl = Math.hypot(car.fwd.x, car.fwd.z), want = _v2.set(hl > 1e-6 ? -car.fwd.x / hl * L : 0, 0, hl > 1e-6 ? -car.fwd.z / hl * L : 0);
+        off.addScaledVector(want.sub(off), dt * K.rate);                                 // pull towards L behind the car at 0.8/s
         const len = off.length();
-        if (len > L) off.multiplyScalar(L / len);                                     // clamp (max length assumed = L)
-        if (len < C.CAM.minLen) off.multiplyScalar(C.CAM.minLen / Math.max(len, 1e-4));
-        this.eye.copy(this.target).add(off);
-        // up vector eases toward the car up (y made positive)
-        const k = Math.min(1, dt);
-        this.up.x += (car.up.x - this.up.x) * k; this.up.y += (Math.abs(car.up.y) - this.up.y) * k; this.up.z += (car.up.z - this.up.z) * k;
-        if (opts.collideEye) opts.collideEye(this.eye, C.CAM.radius, this.target);   // 0.96 m sphere vs collision meshes + line-of-sight (>3 m)
+        if (len > Lmax) off.multiplyScalar(Lmax / len);                                  // both tests use the length before scaling
+        if (len < K.minLen) off.multiplyScalar(K.minLen / Math.max(len, 1e-4));
+        eye.copy(tg).add(off);
+        this.up.x += (car.up.x - this.up.x) * dt; this.up.y += (Math.abs(car.up.y) - this.up.y) * dt; this.up.z += (car.up.z - this.up.z) * dt;
       }
-      this.vel.copy(this.eye).sub(this.prevEye).divideScalar(Math.max(dt, 1e-4));
-      // view (FUN_00417630): a little vertical shake of the look-at point proportional to camera speed
-      const tgt = this.target.clone();
-      if (this.mode < 2) { const sp = Math.min(this.vel.length(), C.CAM.shakeCapSpeed); tgt.y += sp * C.CAM.shake * (Math.random() - 0.5); }
-      camera.position.copy(this.eye); camera.up.copy(this.up).normalize(); camera.lookAt(tgt);
+      if (opts.tris && !opts.noCollide) { // 0.96 m sphere out of every block triangle in the eye +-1.2 box, then the line of sight to the car (> 3 m: jump 1 m past the obstacle)
+        const B = K.box, tris = opts.tris(eye.x - B, eye.y - B, eye.z - B, eye.x + B, eye.y + B, eye.z + B), c = _v3;
+        for (const t of tris) { closestOnTri(eye, t, c); const d = eye.distanceTo(c); if (d < K.radius && d > 1e-6) eye.addScaledVector(_v1.copy(eye).sub(c), (K.radius - d) / d); }
+        if (eye.distanceTo(tg) > K.losDist) {
+          const dir = _v2.copy(car.pos).sub(eye), dist = dir.length(); dir.divideScalar(dist || 1); let best = 5000;
+          for (const t of tris) { const s = rayTri(eye, dir, t); if (s >= 0 && s < best) best = s; }
+          if (best < dist) eye.addScaledVector(dir, best + 1);
+        }
+      }
+      if (dt > 0) {
+        this.vel.copy(eye).sub(this.prevEye).divideScalar(dt);
+        const cv = car.vel.length(), v = this.vel.length(); if (!this.free && v > cv) this.vel.multiplyScalar(K.velClamp * cv / v);   // only used for the shake (and the listener)
+      }
+      // view (FUN_00417630): does not touch the stored eye/target
+      const cb = (car.par && car.par.camBytes) || [0, 0, 0, 0], ve = this.viewEye, vt = this.viewTarget;
+      if (this.free) { ve.copy(eye); vt.copy(tg); camera.up.copy(this.up).normalize(); }
+      else if (this.lookBehind) { // B in any mode: fixed front camera, target = pos + up, eye = target + up*C + fwd*D (C = D = 0 for 5 cars: degenerate in the original, guarded with 1 / 6)
+        let Cc = cb[2] * K.parScale, Dd = cb[3] * K.parScale; if (!Cc && !Dd) { Cc = K.backUp; Dd = K.backFwd; }
+        vt.copy(car.pos).add(car.up); ve.copy(vt).addScaledVector(car.up, Cc).addScaledVector(car.fwd, Dd); camera.up.copy(car.up);
+      } else if (this.mode < 2) { // chase: small vertical shake of the look-at point from the camera speed
+        const s = Math.min(this.vel.length(), K.shakeCapSpeed); ve.copy(eye); vt.copy(tg); vt.y += s * K.shake * (Math.random() - 0.5); camera.up.copy(this.up).normalize();
+      } else { // mode 2: hood / roof camera, eye = pos + up*A + fwd*B, target = eye + fwd (A = B = 0: eye at the CG, as in the original)
+        ve.copy(car.pos).addScaledVector(car.up, cb[0] * K.parScale).addScaledVector(car.fwd, cb[1] * K.parScale); vt.copy(ve).add(car.fwd); camera.up.copy(car.up);
+      }
+      camera.position.copy(ve); camera.lookAt(vt);
       return this;
     }
   }
@@ -268,14 +304,16 @@
     const ml = ref.kids[0].type === YD.T.MATLIST ? ref.kids[0] : ref.kids[0].kids.find(k => k.type === YD.T.MATLIST);   // citstdmat.ref: the list is the root's child
     const descs = YD.readMaterials(ml);
     const find = re => { const i = descs.findIndex(d => re.test(d.tex) || re.test(d.name)); return i < 0 ? null : { i, d: descs[i], raw: parseMaterialRaw(new Uint8Array(ml.kids[i].data)) }; };
-    const sunM = find(/sun/i), lens = [find(/lens0/i), find(/lens1/i), find(/lens2/i)];
-    const mk = async (m, size) => {
-      if (!m) return null; const tex = await ts.get(m.d.tex);
-      const mat = new T.SpriteMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false, blending: T.AdditiveBlending, fog: false });
+    // lens flare (FUN_00418750): material 'LensFlare' (DAT_0049cde4, emissive white). Its texture name 'lens.tga' is not in citstdmat.tex; the archive holds
+    // lens0.tga and lens1.tga (64x64, shape in alpha) = the two flare quads (the lens0-2.jpg are unused leftovers, like sun.jpg next to the used sun.bmp)
+    const sunM = find(/^sun$/i) || find(/sun/i), lensM = find(/^lensflare$/i);
+    const mk = async (m, size, texName, add) => {
+      if (!m) return null; const tex = await ts.get(texName || m.d.tex); if (!tex) return null;
+      const mat = new T.SpriteMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false, blending: add ? T.AdditiveBlending : T.NormalBlending, fog: false });
       const s = new T.Sprite(mat); s.scale.set(size, size, 1); s.renderOrder = 900; s.visible = false; scene.add(s); return s;
     };
-    const sun = await mk(sunM, C.SUN_SIZE);
-    const flares = []; for (const [k, sz] of [[0, 3], [1, 1.5], [2, 1]]) { const f = await mk(lens[k], sz); if (f) flares.push(f); }
+    const sun = await mk(sunM, C.SUN_SIZE, null, true);
+    const flares = []; for (const [tn, sz] of [['lens0.tga', 0.5], ['lens1.tga', 0.25]]) { const f = await mk(lensM, sz, tn, false); if (f) flares.push(f); }   // two quads, sizes 0.5 / 0.25 (spec-render.md)
     return {
       sun, flares,
       update(camera) { // call after updateLighting()

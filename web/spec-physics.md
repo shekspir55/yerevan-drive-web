@@ -164,20 +164,24 @@ Consequences: tyres are very grippy (`mu*g` ~1.3, +downforce growing with v^2), 
 
 * **Which bodies:** player, AI opponents and traffic are the *same* dynamic class (same `FUN_00413480`). Each car sits in its block's linked list
   (`block+0x94`, car init `FUN_00401470`); `FUN_004231c0` collects every other car whose bounding box overlaps (lists `block+0x98`/`+0x8c`, array `DAT_004da4d0`),
-  and `FUN_00420330` calls `FUN_0041f900(car, other)` for each. So player-vs-AI, player-vs-traffic and AI-vs-AI take exactly the same path, each pair is processed from both cars' updates (the second pass finds no overlap).
+  and `FUN_00420330` calls `FUN_0041f900(car, other)` for each. So player-vs-AI, player-vs-traffic and AI-vs-AI take exactly the same path, each pair is processed from both cars' updates (A tests B's points in A's box, then B tests A's points in B's box; the second pass only acts if overlap is left after the ~3 cm bisection).
   There are **no kinematic cars**. If a car has no block (`car+0xb8 == 0`) its physics is skipped.
-* **Car vs car (`FUN_0041f900`):** corners of the other car are tested against this car's OBB (`FUN_0041db70`); the deepest corner defines the contact point and the push direction
-  (horizontal, from this car to the other). A bisection finds the separation distance `s`; the bodies are moved apart **in proportion to the other's mass**
-  (`this` moves `mB/(mA+mB)*s`, other moves `mA/(mA+mB)*s`: the lighter car moves further) via `FUN_0041d680`. Then an impulse
-  `J = (vA - vB) * (mA*mB*0.1/(mA+mB))` is applied with scale 0.1 and opposite signs at the contact point (`slot 7`, `FUN_004108f0` -> `FUN_0041de20`):
-  `dvA = -(vA-vB)*0.01*mB/(mA+mB)`, `dvB = +(vA-vB)*0.01*mA/(mA+mB)`. **About 1% of the relative velocity per frame**, mass weighted, plus an angular kick from the contact offset. Masses are the par masses.
-  Restitution 0; no velocity clamp, no damage, no stun, no stopping of traffic.
+* **Car vs car (`FUN_0041f900`; corrected 2026-10-27 from the asm, details in `spec-collision-camera.md` A.3):** the test points of the other car B are its **8 box corners plus 6 face centres**
+  in full 3D (pitch and roll included; box = raw `bound` vertex AABB, not centred), tested against this car's 3D OBB (`FUN_0041db70`). The contact point P is the inside point **closest to A's centre**.
+  The push direction is **not** a contact normal: it is the horizontal centre-to-centre line `n = normalize(B.pos - A.pos, y = 0)` (guard `n = 0` in a port: the original would loop forever).
+  A coarse march (0.5 m steps) plus a 4-step bisection finds the exit distance `t` of P along n; the bodies are moved apart **in proportion to the other's mass**
+  (B moves `mA/(mA+mB)*t`, A moves `mB/(mA+mB)*t`: the lighter car moves further) via `FUN_0041d680`, and P follows B. Then
+  `J = (vA - vB) * 0.1*mA*mB/(mA+mB)` (full 3D relative CG velocity, applied even when separating) goes to both cars with opposite signs at P (`slot 7`, `FUN_004108f0` -> `FUN_0041de20`, scale 0.2):
+  **the linear part is unscaled** (`dvA = -0.1*(vA-vB)*mB/(mA+mB)`, `dvB = +0.1*(vA-vB)*mA/(mA+mB)`), **only the angular part uses 0.2** (`omega += I^-1 (r x 0.2 J)`).
+  So **10 % of the relative velocity per call** (up to 19 % per frame with both passes; ~8 % left after 0.4 s), mass weighted, momentum conserved. Masses are the par masses.
+  Restitution 0; no velocity clamp, no damage, no stun, no stopping of traffic. (The earlier text here said "deepest corner", "about 1 % per frame" and "scale 0.1": wrong.)
 * **Sound/effects only:** `FUN_00410880` records the impact strength when `|J| > 200` (`car+0x15c`) and the point; the update plays a crash sound (strength clamped at 5000, volume `(s-200)/4800`) with a 0.2 s cooldown (`car+0x158`).
 * **Car vs static world (`FUN_0041e930`, response `FUN_0041e7a0`):** rays from the car centre to its 8 body corners (`car+0xbc`) are cast against the city triangles (`FUN_00423270`) and static colliders (`DAT_004da548`: poles, trees, kiosks from `block+0xb0`).
   Penetration `pen = (hitDist - cornerDist)`: the car is **pushed out along the surface normal by `pen*(dir.n)*1.01`** (hard position correction, `FUN_0041d680`),
   then `FUN_0041e7a0` at the corner: `vn = v_point . n`; normal force `-(vn)*n*m*0.1` (10% of the normal velocity removed per call), plus tangential Coulomb friction of `0.5 * |normal force|` opposing the tangential velocity; applied with scale 1.0 (`slot 7`). Restitution 0: **no bounce**, speed bleeds off over several frames while the car is held out of the wall.
-* **Port:** `YDPhysOrig.resolveCarCollision(a, b, nx, nz, pen, px, py, pz, {dt})` and `YDPhysOrig.resolveWorldContact(phys, nx, nz, pen, px, py, pz, {dt})` implement the rules above (fractions are rescaled from "per 60 fps frame" using `dt`).
-  Use them for player/AI/traffic pairs with traffic cars as dynamic bodies (kinematic traffic + restitution > 1 is what throws the player away).
+* **Port:** `YDPhysOrig.collideCars(A, B, h)` implements the car-car rule literally (called from `YDSim.collideBodies` for both orders of every pair; traffic cars are `OrigCarPhysics` bodies, and so are network players' cars and, on network clients, the host's traffic: simulated with the sender's input flags and corrected per packet, `net.js`, spec-collision-camera.md B; no contact message, each peer resolves its own car against the copies);
+  `YDPhysOrig.resolveWorldContact(phys, nx, nz, pen, px, py, pz, {dt})` the world rule (fractions are rescaled from "per 60 fps frame" using `dt`). `resolveCarCollision` is the old 2D variant, unused.
+  The world response `FUN_0041e7a0` uses the point velocity at the contact (v + w x r); `resolveWorldContact` uses the CG velocity.
 
 ## 10. Port interface (`web/physics-orig.js`)
 

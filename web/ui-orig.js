@@ -227,6 +227,12 @@
     constructor(ui, font, x, y, h, text, color) { super(ui, 0, 0xc0000000, x, y, h, h, text); this.font = font; this.color = color; }
     draw(xo, yo) { this.ui.r.text(this.font, this.x + xo, this.y + yo, this.h, this.h, this.color, this.name, 9); }
   }
+  // report line (FUN_0042ec50, id 0x36, box x -0.35 w 1.0 h 0.05 at y = rank*0.08-0.5 from FUN_00430770; draw 0x42ed20): "%d." at x, the racer's name
+  // at x+0.07, the car name at x+0.4 in the car's paint colour (car+0x1e0 RGBA floats *255); all 0.06 high, flags 8, white. No time column in the original.
+  class ReportRow extends Item {
+    constructor(ui, font, rank, name, car, color) { super(ui, 0x36, 0xc0000000, -0.35, rank * 0.08 - 0.5, 1.0, 0.05, name); this.font = font; this.rank = rank; this.car = car; this.color = color >>> 0; }
+    draw(xo, yo) { const R = this.ui.r, x = this.x + xo, y = this.y + yo; R.text(this.font, x, y, 0.06, 0.06, 0xffffffff, this.rank + '.', 8); R.text(this.font, x + 0.07, y, 0.06, 0.06, 0xffffffff, this.name, 8); R.text(this.font, x + 0.4, y, 0.06, 0.06, this.color, this.car, 8); }
+  }
   // textured/solid rectangle (FUN_0042e7b0 / draw FUN_0042e800)
   class Panel extends Item {
     constructor(ui, mat, x, y, w, h, color) { super(ui, 0, 0xc0000000, x, y, w, h, ''); this.mat = mat; this.color = color >>> 0; }
@@ -245,11 +251,13 @@
     }
     draw(xo, yo) {
       const R = this.ui.r, rh = 0.055;
+      if (this.items.length && !this.sel) R.text(this.font, this.x + xo + 0.03, this.y + yo + this.h + 0.05, 0.05, 0.05, 0xffc8c8ff, this.ui.S('STRINGS', 'NotChoiced', 'Not chosen'), 0x0a);   // no session picked yet
       this.items.forEach((it, i) => {
         const ty = this.y + yo + 0.012 + i * rh; if (ty + rh > this.y + yo + this.h) return;
         if (i === this.selIdx) R.sprite(null, this.x + xo + 0.01, ty, this.w - 0.02, rh, 0x66ffffff);
         const col = i === this.selIdx ? 0xffffffff : 0xffc8c8ff;
-        R.text(this.font, this.x + xo + 0.03, ty + rh * 0.5, 0.05, 0.05, col, (it.password ? '* ' : '') + it.name, 0x0a);
+        R.text(this.font, this.x + xo + 0.03, ty + rh * 0.5, 0.05, 0.05, col, it.name, 0x0a);
+        R.text(this.font, this.x + xo + this.w - 0.2, ty + rh * 0.5, 0.05, 0.05, col, this.ui.S('STRINGS', it.password ? 'Protected' : 'Notprotected', it.password ? 'Protected' : 'Not protected'), 0x1a);
         R.text(this.font, this.x + xo + this.w - 0.05, ty + rh * 0.5, 0.05, 0.05, col, it.players + '/' + it.max, 0x1a);
       });
     }
@@ -472,7 +480,7 @@
       s.carId = geti(cfg, 'MYCAR', 'CarID', 0); s.colorIdx = geti(cfg, 'MYCAR', 'Color', 0); s.plateType = geti(cfg, 'MYCAR', 'Hamar', 0);
       s.plateText = cfg.get('MYCAR', 'HamarName', ''); s.myName = cfg.get('MYCAR', 'MyName', ''); s.auto = geti(cfg, 'MYCAR', 'Transmission', 1) !== 0;
       s.single = { gameType: geti(cfg, 'SINGLE', 'GameType', 0), opponents: geti(cfg, 'SINGLE', 'NumOpponents', 7), opponentCars: geti(cfg, 'SINGLE', 'OpponentCars', 0), laps: geti(cfg, 'SINGLE', 'Laps', 2), traffic: geti(cfg, 'SINGLE', 'Traffic', 1), hardness: geti(cfg, 'SINGLE', 'Hardness', 1) };
-      s.multi = { playerName: cfg.get('MULTI', 'PlayerName', ''), sessionName: cfg.get('MULTI', 'SessionName', ''), maxPlayers: geti(cfg, 'MULTI', 'MaxPlayers', 2), laps: geti(cfg, 'MULTI', 'Laps', 2), gameType: geti(cfg, 'MULTI', 'GameType', 0) };
+      s.multi = { playerName: cfg.get('MULTI', 'PlayerName', ''), sessionName: cfg.get('MULTI', 'SessionName', ''), maxPlayers: geti(cfg, 'MULTI', 'MaxPlayers', 2), laps: geti(cfg, 'MULTI', 'Laps', 2), gameType: geti(cfg, 'MULTI', 'GameType', 0), password: cfg.get('MULTI', 'Password', '') };
       // paint colours: Cars/carcol.ini COLOR0..COLORn with R,G,B floats (stops at the first missing entry; max 25)
       s.colors = [];
       try {
@@ -480,7 +488,6 @@
         for (let i = 0; i < 25; i++) { const r = parseFloat(cc.get('COLOR' + i, 'R', '-1')), g = parseFloat(cc.get('COLOR' + i, 'G', '-1')), b = parseFloat(cc.get('COLOR' + i, 'B', '-1')); if (r < 0 || g < 0 || b < 0) break; s.colors.push([r, g, b]); }
       } catch (e) { /* no colour table */ }
       if (opts.colors) s.colors = opts.colors;
-      if (s.colors.length === 10) s.colors.push([0.95, 0.95, 0.95], [0.7, 0.72, 0.75], [0.03, 0.03, 0.03], [0.75, 0.05, 0.05], [0.1, 0.25, 0.7], [0.9, 0.75, 0.1]);   // the original palette has only these 10 colours (no white): web port adds white, silver, black, red, blue, yellow (same list in game.js EXTRA_COLS)
       // car list: every Cars/<dir> that has avto.ref + avto.tex + avto.par, kept sorted by the CarID stored in the .par (@0x84)
       let folders = DEFAULT_CARS;
       if (vfs.files) { const set = new Set(); for (const k of vfs.files.keys()) { const m = /^cars\/([^/]+)\/avto\.par$/.exec(k); if (m) set.add(m[1]); } if (set.size) folders = [...set]; }
@@ -495,8 +502,17 @@
       s.cars.sort((a, b) => a.id - b.id);
       if (!s.registered) s.cars.length = Math.min(1, s.cars.length);
       s.carIdx = Math.max(0, s.cars.findIndex(c => c.id === s.carId));
+      // the original writes its choices back to config.ini; the browser keeps them in localStorage (missing/blocked storage = config.ini defaults)
+      const j = opts.noStore ? null : Settings.stored();
+      if (j) {
+        for (const k of ['sound', 'music', 'colorIdx', 'plateType', 'plateText', 'myName', 'auto', 'showMap', 'showTakh', 'texLOD', 'viewDist', 'bpp']) if (j[k] !== undefined && typeof j[k] === typeof s[k]) s[k] = j[k];
+        if (j.single) Object.assign(s.single, j.single); if (j.multi) Object.assign(s.multi, j.multi);
+        const ci = s.cars.findIndex(c => c.id === j.carId); if (ci >= 0) s.carIdx = ci; if (!(s.colorIdx < s.colors.length)) s.colorIdx = 0;
+      }
       return s;
     }
+    static stored() { try { return JSON.parse(global.localStorage.getItem('yd.settings') || 'null'); } catch (e) { return null; } }
+    save() { try { global.localStorage.setItem('yd.settings', JSON.stringify(this)); } catch (e) { } }
     car() { return this.cars[this.carIdx]; }
     nextCar() { this.carIdx = (this.carIdx + 1) % this.cars.length; }                      // FUN_00427040
     prevCar() { this.carIdx = this.carIdx === 0 ? this.cars.length - 1 : this.carIdx - 1; } // FUN_00427090
@@ -509,7 +525,7 @@
     }
     nextPlate(n) { this.plateType = (this.plateType + 1) % n; }                              // FUN_0042a610
     prevPlate(n) { this.plateType = this.plateType === 0 ? n - 1 : this.plateType - 1; }     // FUN_0042a650
-    toJSON() { return { sound: this.sound, music: this.music, colorIdx: this.colorIdx, plateType: this.plateType, plateText: this.plateText, myName: this.myName, auto: this.auto, carId: this.car() && this.car().id, showMap: this.showMap, showTakh: this.showTakh, texLOD: this.texLOD, viewDist: this.viewDist, bpp: this.bpp, single: this.single }; }
+    toJSON() { return { sound: this.sound, music: this.music, colorIdx: this.colorIdx, plateType: this.plateType, plateText: this.plateText, myName: this.myName, auto: this.auto, carId: this.car() && this.car().id, showMap: this.showMap, showTakh: this.showTakh, texLOD: this.texLOD, viewDist: this.viewDist, bpp: this.bpp, single: this.single, multi: this.multi }; }
   }
 
   // US-layout DIK scancode -> character bytes; Armenian (ArmSCII-8) phonetic layout for lang 1.
@@ -564,8 +580,9 @@
     S(sec, key, def) { return this.ini.get(sec, key, def); }                                 // FUN_00423cd0
     ensureAudio() {
       if (this.audio || !(global.AudioContext || global.webkitAudioContext)) return;
-      this.audio = new (global.AudioContext || global.webkitAudioContext)(); this.gain = this.audio.createGain(); this.gain.gain.value = this.settings.sound / 100; this.gain.connect(this.audio.destination);
-      if (!this.menuMusic && !this.stopped && this.vfs) this.vfs.bytes('Menu/menu.mp3').then(b => { if (this.stopped || this.menuMusic) return; const m = new Audio(URL.createObjectURL(new Blob([b], { type: 'audio/mpeg' }))); m.loop = true; m.volume = Math.min(1, (this.settings.music === undefined ? 50 : this.settings.music) / 100); this.menuMusic = m; m.play().catch(() => { }); }).catch(() => { });   // Menu/menu.mp3 plays while the menus are open
+      this.audio = new (global.AudioContext || global.webkitAudioContext)(); this.gain = this.audio.createGain(); this.gain.gain.value = global.YDVol ? global.YDVol.sfx(this.settings.sound) : this.settings.sound / 100;   // dB curve of [VOLUME] (game.js YDVol)
+      this.gain.connect(this.audio.destination);
+      if (!this.menuMusic && !this.stopped && this.vfs) this.vfs.bytes('Menu/menu.mp3').then(b => { if (this.stopped || this.menuMusic) return; const m = new Audio(URL.createObjectURL(new Blob([b], { type: 'audio/mpeg' }))); m.loop = true; m.volume = global.YDVol ? global.YDVol.music(this.settings.music === undefined ? 50 : this.settings.music) : Math.min(1, (this.settings.music === undefined ? 50 : this.settings.music) / 100); this.menuMusic = m; m.play().catch(() => { }); }).catch(() => { });   // Menu/menu.mp3 plays while the menus are open
     }
     async playSound(name) {
       if (!name || !this.snd || !this.snd.has(name)) return; this.ensureAudio(); if (!this.audio) return;
@@ -679,6 +696,7 @@
           if (p2 === 0xf) { if (sc.focusTop && sc.focusTop === sc.kids[sc.kids.length - 1]) { sc.focusTop.clearHover(); sc.focusTop = sc.focus = null; } sc.focusNext(); }
       }
       if (!sc.focus) sc.onEvent(type, p2, p3);
+      if (this.settings && (type !== 3 || (p2 & 1))) this.settings.save();   // keep every choice (config.ini in the original)
     }
     // browser glue
     pointer(clientX, clientY) { const b = this.canvas.getBoundingClientRect(); this.mx = (clientX - b.left) / b.width * 2 - 1; this.my = (clientY - b.top) / b.height * 2 - 1; }
@@ -744,7 +762,7 @@
       if (f) switch (f.id) {
         case 2: if (type === 0xe) { ui.show(5, true); return 0; } break;
         case 0x1d: st.bpp = f.value; break; case 0x22: st.texLOD = f.idx; break; case 0x1f: st.viewDist = f.idx; break;
-        case 0x20: if (type === 0xf) { st.sound = p2; if (ui.gain) ui.gain.gain.value = p2 / 100; ui.onSettings && ui.onSettings(st); return 0; } break;
+        case 0x20: if (type === 0xf) { st.sound = p2; if (ui.gain) ui.gain.gain.value = global.YDVol ? global.YDVol.sfx(p2) : p2 / 100; ui.onSettings && ui.onSettings(st); return 0; } break;
         case 0x21: if (type === 0xf) { st.music = p2; ui.onSettings && ui.onSettings(st); return 0; } break;
       }
       if (type === 7 && p2 === 1) ui.show(5, true);
@@ -800,6 +818,7 @@
     sp.applySettings();
     sp.onEvent = function (type, p2, p3) {                                                // FUN_00432730
       if (type === 8) { trans.set(st.auto ? 1 : 0); plateF.setText(st.plateText); nameF.setText(st.myName); }
+      if (type === 0xc || type === 0xd) Object.assign(st.single, { gameType: gt.value, opponents: opp.value, opponentCars: oc.idx, hardness: hd.idx, laps: lp.value, traffic: tr.idx });
       const f = this.focus;
       if (f) switch (f.id) {
         case 2: if (type === 0xe) { ui.show(5, true); return 0; } break;
@@ -840,6 +859,23 @@
     };
     // the dialog is a child of the screen below: its coordinates are absolute NDC, so give it full-screen bounds for rendering
     dlg.x = -1; dlg.y = -1; dlg.w = 2; dlg.h = 2;
+    // ---- in-game question / message box (dialog id 0x3d, same layout as 0x3a): [STRINGS] RestartGame / MainMenu / ExitWindows, OK = do it; message mode = OK only ----
+    const cf = this.addScreen(new Screen(this, 0x3d, 'Confirm')); cf.flags = 0x42000000;
+    const cfPanel = cf.add(new Panel(ui, M.wnd, -dw * 0.5, -dh * 0.5, dw, dh, 0xd246553c));
+    const cfText = cf.add(new Label(ui, small, 0, 0.08 - dh * 0.5, 0.06, '', 0xffffffff));
+    const cfOk = cf.add(new TextButton(ui, 3, 0x40000000, big, -0.175, by, 0.25, 0.064, S('STRINGS', 'OK', 'OK'), ui.sndButton)), cfNo = cf.add(new TextButton(ui, 4, 0x40000000, big, 0.175, by, 0.25, 0.064, S('STRINGS', 'Cancel', 'Cancel'), ui.sndButton));
+    cf.close = function () { const s = ui.screens.get(this.returnTo); if (s && s.modal === this) s.modal = null; this.clearHover(); this.focus = this.focusTop = null; };
+    cf.onEvent = function (type, p2) {
+      const f = this.focus;
+      if (f && type === 0xe) { const fn = this.onOk; this.close(); if (f.id === 3 && fn) fn(); return 0; }
+      if (type === 7 && (p2 === 1 || (p2 === 0x1c && this.okOnly))) this.close();
+      return 0;
+    };
+    cf.hit = dlg.hit; cf.x = -1; cf.y = -1; cf.w = 2; cf.h = 2;
+    // text may hold '\n' for a second line; fn runs on OK; okOnly = a message with just OK
+    ui.confirm = (text, fn, okOnly) => { const tw = small.measure(text) * 0.06 * H / 2 / small.cellH / (W / 2), pw = Math.max(dw, tw + 0.08); cfPanel.x = -pw * 0.5; cfPanel.w = pw; /* long questions widen the box */ cfText.name = text; cf.onOk = fn || null; cf.okOnly = !!okOnly; cfNo.setVisible(!okOnly); cfOk.x = (okOnly ? 0 : -0.175) - cfOk.w * 0.5; cf.clearHover(); cf.focus = cf.focusTop = null; ui.modal(0x3d); };
+    ui.message = text => ui.confirm(text, null, true);
+    const ask = (key, def, c) => ui.confirm(S('STRINGS', key, def), () => cmd(c));
     // ---- MultiPlayer (id 0x27, built by FUN_00433bc0-ish at yd.c:35399) ----
     const mp = this.addScreen(new Screen(this, 0x27, 'MultiPlayer'));
     mp.add(new TitleLabel(ui, big, 0, -0.95, 0, 0.065, S('MULTIPLAYER', 'Name', 'MULTIPLAYER GAME')));
@@ -860,14 +896,17 @@
     const mpJoin = mp.add(new TextButton(ui, 0x2c, 0xc0000000, big, 0.4, 0.6, 0.3, 0.064, S('MULTIPLAYER', 'Join', 'Join to game'), ui.sndButton));
     mp.add(new TextButton(ui, 2, 0x40000000, big, -0.45, 0.9, 0.2, 0.064, S('ALL', 'Back', 'BACK'), ui.sndButton));
     mp.onEvent = function (type, p2) {
-      if (type === 8) { mpName.setText(st.myName); mpSess.setText(st.multi.sessionName); mpMax.set(Math.max(0, (st.multi.maxPlayers || 2) - 2)); mpType.set(2); mpLaps.setEnabled(false); mpJoin.setEnabled(false); mpList.items = []; mpList.selIdx = -1; mpList.timer = 99; }
+      if (type === 8) {   // config.ini [MULTI]: GameType 2/3/4 = walk / race / Gogh & Milica (network types of this+0xadc)
+        const m = st.multi, g = m.gameType >= 2 ? m.gameType - 2 : m.gameType;
+        mpName.setText(m.playerName || st.myName); mpSess.setText(m.sessionName); mpPass.setText(m.password || ''); mpMax.set(Math.max(0, Math.min(6, (m.maxPlayers || 2) - 2)));
+        mpType.set(Math.max(0, Math.min(2, g || 0))); mpLaps.set(Math.max(0, Math.min(3, (m.laps || 2) - 2))); mpLaps.setEnabled(mpType.idx === 1); mpJoin.setEnabled(false); mpList.items = []; mpList.selIdx = -1; mpList.timer = 99; }
       if (type === 0x31) mpJoin.setEnabled(false);   // the chosen session is gone
       if (type === 0x30) mpJoin.setEnabled(true);    // a session row was selected
       const f = this.focus;
       if (f) switch (f.id) {
         case 0xb: if (type === 0xc || type === 0xd) mpLaps.setEnabled(mpType.idx === 1); break;
-        case 0x2d: if (type === 0xe) { ui.onNetwork && ui.onNetwork('create', { name: mpName.text, password: mpPass.text, session: mpSess.text, maxPlayers: mpMax.value, gameType: mpType.idx, laps: mpLaps.value }); return 0; } break;
-        case 0x2c: if (type === 0xe) { ui.onNetwork && ui.onNetwork('join', { name: mpName.text, password: mpPass.text, session: mpList.sel && mpList.sel.name }); return 0; } break;
+        case 0x2d: if (type === 0xe) { Object.assign(st.multi, { playerName: mpName.text, sessionName: mpSess.text, password: mpPass.text, maxPlayers: mpMax.value, gameType: mpType.idx + 2, laps: mpLaps.value }); ui.onNetwork && ui.onNetwork('create', { name: mpName.text, password: mpPass.text, session: mpSess.text, maxPlayers: mpMax.value, gameType: mpType.idx, laps: mpLaps.value }); return 0; } break;
+        case 0x2c: if (type === 0xe) { Object.assign(st.multi, { playerName: mpName.text, password: mpPass.text }); ui.onNetwork && ui.onNetwork('join', { name: mpName.text, password: mpPass.text, session: mpList.sel && mpList.sel.name }); return 0; } break;
         case 2: if (type === 0xe) { ui.show(5, true); return 0; } break;
       }
       if (type === 7 && p2 === 1) ui.show(5, true);
@@ -894,8 +933,8 @@
         case 0x11: if (type === 0xe) { cmd('mpgo'); return 0; } break;       // GO TO CITY (FUN_00426e80: host sends the start message)
         case 0x39: if (type === 0xe) { cmd('mpchoice'); return 0; } break;   // CHOICE CAR (FUN_00429420: broadcast car, colour and plate)
         case 8: if (type === 0xe) { ui.screens.get(0x26).returnId = 0x38; ui.show(0x26, false); return 0; } break;
-        case 0x34: if (type === 0xe) { cmd('menu'); return 0; } break;
-        case 1: if (type === 0xe) { cmd('exit'); return 0; } break;
+        case 0x34: if (type === 0xe) { ask('MainMenu', 'Back to the main menu?', 'menu'); return 0; } break;
+        case 1: if (type === 0xe) { ask('ExitWindows', 'Exit?', 'exit'); return 0; } break;
         case 0x12: st.auto = gTrans.idx !== 0; break;
         case 0x14: if (type === 10) st.prevCar(); else if (type === 0xb) st.nextCar(); if (type === 10 || type === 0xb) return 0; break;
         case 0x15: if (type === 10) st.prevColor(); else if (type === 0xb) st.nextColor(); if (type === 10 || type === 0xb) return 0; break;
@@ -915,7 +954,7 @@
     gm.add(new TextButton(ui, 1, 0x40000000, big, 0, 0.15, 0.6, 0.064, S('ALL', 'ExitWindows', 'EXIT WINDOWS'), ui.sndButton));
     gm.onEvent = function (type, p2) {
       const f = this.focus;
-      if (f && type === 0xe) { if (f.id === 8) ui.show(0x26, false); else if (f.id === 0x32) cmd('restart'); else if (f.id === 0x34) cmd('menu'); else if (f.id === 1) cmd('exit'); return 0; }
+      if (f && type === 0xe) { if (f.id === 8) ui.show(0x26, false); else if (f.id === 0x32) ask('RestartGame', 'Restart the game?', 'restart'); else if (f.id === 0x34) ask('MainMenu', 'Back to the main menu?', 'menu'); else if (f.id === 1) ask('ExitWindows', 'Exit?', 'exit'); return 0; }
       if (type === 7 && p2 === 1) cmd('resume');
       return 0;
     };
@@ -931,11 +970,27 @@
       const f = this.focus;
       if (f) switch (f.id) {
         case 3: if (type === 0xe) { ui.show(this.returnId || 0x31, false); this.returnId = 0x31; return 0; } break;
-        case 0x20: if (type === 0xf) { st.sound = p2; if (ui.gain) ui.gain.gain.value = p2 / 100; ui.onSettings && ui.onSettings(st); return 0; } break;
+        case 0x20: if (type === 0xf) { st.sound = p2; if (ui.gain) ui.gain.gain.value = global.YDVol ? global.YDVol.sfx(p2) : p2 / 100; ui.onSettings && ui.onSettings(st); return 0; } break;
         case 0x21: if (type === 0xf) { st.music = p2; ui.onSettings && ui.onSettings(st); return 0; } break;
         case 0x23: st.showMap = f.idx !== 0; break; case 0x24: st.showTakh = f.idx !== 0; break;
       }
       if (type === 7 && p2 === 1) { ui.show(this.returnId || 0x31, false); this.returnId = 0x31; }
+      return 0;
+    };
+    // network in-game menu GMMain 0x37 (FUN_004308b0, handler FUN_004337a0; opened by FUN_004283f0 for network game types, the game is not paused):
+    // RESTART GAME (0x32, host) and PLEASE RESTART GAME (0x33, the others) share y -0.15, both built hidden (flags 0) and switched by host (FUN_0042a6c0);
+    // 0x32 -> question 0x3c, 0x33 -> FUN_00426e10 (message 10 to the host, no question), OPTIONS -> 0x26 returning here, MAIN MENU -> 0x3d, EXIT -> 0x3a, Esc -> resume
+    const gn = this.addScreen(new Screen(this, 0x37, 'GMMain'));
+    gn.add(new Panel(ui, null, -0.35, -0.5, 0.7, 1.0, PANEL));
+    gn.add(new TextButton(ui, 0x32, 0, big, 0, -0.15, 0.6, 0.064, S('ALL', 'RestartGame', 'RESTART GAME'), ui.sndButton));
+    gn.add(new TextButton(ui, 0x33, 0, big, 0, -0.15, 0.6, 0.064, S('ALL', 'PleaseRestart', 'PLEASE RESTART GAME'), ui.sndButton));
+    gn.add(new TextButton(ui, 8, 0x40000000, big, 0, -0.06, 0.6, 0.064, S('OPTIONS', 'Name', 'OPTIONS'), ui.sndButton));
+    gn.add(new TextButton(ui, 0x34, 0x40000000, big, 0, 0.03, 0.6, 0.064, S('ALL', 'MainMenu', 'MAIN MENU'), ui.sndButton));
+    gn.add(new TextButton(ui, 1, 0x40000000, big, 0, 0.12, 0.6, 0.064, S('ALL', 'ExitWindows', 'EXIT WINDOWS'), ui.sndButton));
+    gn.onEvent = function (type, p2) {
+      const f = this.focus;
+      if (f && type === 0xe) { if (f.id === 8) { go.returnId = 0x37; ui.show(0x26, false); } else if (f.id === 0x32) ask('RestartGame', 'Restart the game?', 'restart'); else if (f.id === 0x33) cmd('pleaserestart'); else if (f.id === 0x34) ask('MainMenu', 'Back to the main menu?', 'menu'); else if (f.id === 1) ask('ExitWindows', 'Exit?', 'exit'); return 0; }
+      if (type === 7 && p2 === 1) cmd('resume');
       return 0;
     };
     const gr = this.addScreen(new Screen(this, 0x35, 'GReport'));
@@ -945,8 +1000,17 @@
     gr.add(new TextButton(ui, 1, 0x40000000, big, 0, 0.49, 0.6, 0.064, S('ALL', 'ExitWindows', 'EXIT WINDOWS'), ui.sndButton));
     gr.onEvent = function (type) {
       const f = this.focus;
-      if (f && type === 0xe) { if (f.id === 0x32) cmd('restart'); else if (f.id === 0x34) cmd('menu'); else if (f.id === 1) cmd('exit'); return 0; }
+      if (f && type === 0xe) { if (f.id === 0x32) ask('RestartGame', 'Restart the game?', 'restart'); else if (f.id === 0x34) ask('MainMenu', 'Back to the main menu?', 'menu'); else if (f.id === 1) ask('ExitWindows', 'Exit?', 'exit'); return 0; }
       return 0;
+    };
+    // fill the report (FUN_00427bb0): drop the old id-0x36 items (FUN_00430740), one ReportRow per racer in standings order (race types 1/3, FUN_00430770),
+    // Gogh & Milica (type 4): no rows, RESTART only for the host (FUN_0042c050 on item 0x32) and one centred label at (0,0), 0.08 high, white:
+    // [STRINGS] GWin (param 0) or MWin (param 1) (FUN_00430820: string table +0x2434 / +0x24b4)
+    this.setReport = (rows, label, canRestart) => {
+      gr.kids = gr.kids.filter(k => k.id !== 0x36); gr.focus = gr.focusTop = null;
+      (rows || []).forEach((r, i) => gr.add(new ReportRow(ui, big, i + 1, r.name, r.car || '', r.color === undefined ? 0xffffffff : r.color)));
+      if (label) { const l = gr.add(new Label(ui, big, 0, 0, 0.08, label, 0xffffffff)); l.id = 0x36; }
+      const rb = gr.find(0x32); if (rb) rb.setVisible(canRestart !== false);
     };
     this.start = () => { this.show(5, true); };
   };
@@ -1081,7 +1145,7 @@
   GameUI.prototype.showMenu = function () { this.mode = 'menu'; this.show(5, true); };
   // render one frame of a named screen without animation (used by ui-test.html and for screenshots)
   GameUI.prototype.renderStatic = function (name, o) {
-    o = o || {}; const ids = { main: 5, single: 10, options: 0x18, credits: 0x25, network: 0x27, gmcar: 0x38, gmain: 0x31, goptions: 0x26, greport: 0x35 }; this.t = o.t === undefined ? 5.3 : o.t; this.mx = o.mx === undefined ? 2 : o.mx; this.my = o.my === undefined ? 2 : o.my;
+    o = o || {}; const ids = { main: 5, single: 10, options: 0x18, credits: 0x25, network: 0x27, gmcar: 0x38, gmain: 0x31, gmmain: 0x37, goptions: 0x26, greport: 0x35 }; this.t = o.t === undefined ? 5.3 : o.t; this.mx = o.mx === undefined ? 2 : o.mx; this.my = o.my === undefined ? 2 : o.my;
     if (name === 'boot') { this.drawSplash(o.splash === undefined ? 3 : o.splash); return; }
     if (name === 'loading') { this.drawLoading(o.progress === undefined ? 0.1 : o.progress); return; }
     if (name === 'hud') {

@@ -29,7 +29,14 @@
       this.cache.set(key, buf);
       return buf;
     }
-    async exists(path) { try { await this.bytes(path); return true; } catch (e) { return false; } }
+    drop(path) { this.cache.delete(path.toLowerCase()); }   // free a file once it has been parsed into its own objects (phones: the archives would stay in memory twice)
+    url(path) { return this.base + path.split('/').map(encodeURIComponent).join('/'); }
+    async exists(path) {   // HEAD only: probing the 50+ MB of music must not download it
+      const key = path.toLowerCase();
+      if (this.files) return this.files.has(key);
+      if (this.cache.has(key)) return true;
+      try { return (await fetch(this.url(path), { method: 'HEAD' })).ok; } catch (e) { return false; }
+    }
     async text(path) { return new TextDecoder('windows-1251').decode(await this.bytes(path)); }
     async ini(path) {
       const out = {}; let sec = null;
@@ -161,20 +168,81 @@
     return { width: bmp.width, height: bmp.height, data: new Uint8Array(id.data.buffer), alpha: ext === 'png' };
   }
 
-  // Texture set from one BFX1 .tex/.atx archive (decoded lazily, cached).
+  // ---------- DXT on the GPU: the original keeps every DDS compressed (D3DXCreateTextureFromFileInMemory). Decoding all of CITMAT.ATX to RGBA costs about
+  // 136 MB (+ mips) instead of 21 MB, which is what kills phones. Kept compressed when the browser has WEBGL_compressed_texture_s3tc (desktop GPUs; most
+  // phones do not), else decoded on the CPU (opaque DXT1 as 16-bit RGB565: half the memory, no loss, DXT1 colours are 565 already). ?nodxt forces the CPU path.
+  let s3tcOk = null;
+  function s3tc() {
+    if (s3tcOk !== null) return s3tcOk;
+    s3tcOk = false;
+    try {
+      if (/[?&]nodxt/.test(location.search)) return s3tcOk;
+      const c = document.createElement('canvas'), gl = c.getContext('webgl2') || c.getContext('webgl');
+      if (gl) { s3tcOk = !!(gl.getExtension('WEBGL_compressed_texture_s3tc') || gl.getExtension('MOZ_WEBGL_compressed_texture_s3tc') || gl.getExtension('WEBKIT_WEBGL_compressed_texture_s3tc')); const lose = gl.getExtension('WEBGL_lose_context'); if (lose) lose.loseContext(); }
+    } catch (e) { s3tcOk = false; }
+    return s3tcOk;
+  }
+  // DDS DXT1/3/5 with a power-of-two size and a full mip chain (true for all but 16 files) -> THREE.CompressedTexture, else null
+  function compressedDDS(buf) {
+    const dv = new DataView(buf); if (buf.byteLength < 128 || dv.getUint32(0, true) !== 0x20534444 || !(dv.getUint32(80, true) & 4)) return null;
+    const h = dv.getUint32(12, true), w = dv.getUint32(16, true), fcc = String.fromCharCode(...new Uint8Array(buf, 84, 4)), bs = fcc === 'DXT1' ? 8 : 16;
+    if (!/^DXT[135]$/.test(fcc) || (w & (w - 1)) || (h & (h - 1)) || w < 4 || h < 4) return null;
+    const n = Math.max(1, dv.getUint32(28, true)); if (n !== Math.log2(Math.max(w, h)) + 1) return null;
+    const mips = []; let p = 128, alpha = fcc !== 'DXT1';
+    for (let i = 0, mw = w, mh = h; i < n; i++, mw = Math.max(1, mw >> 1), mh = Math.max(1, mh >> 1)) {
+      const len = Math.max(1, (mw + 3) >> 2) * Math.max(1, (mh + 3) >> 2) * bs; if (p + len > buf.byteLength) return null;
+      mips.push({ data: new Uint8Array(buf, p, len), width: mw, height: mh }); p += len;
+    }
+    if (!alpha) { const b = mips[0].data, d = new DataView(b.buffer, b.byteOffset, b.length);   // DXT1 punch-through: 3-colour blocks (c0 <= c1) that use index 3 (alpha 0)
+      for (let q = 0; q < b.length && !alpha; q += 8) if (d.getUint16(q, true) <= d.getUint16(q + 2, true)) { const ix = d.getUint32(q + 4, true); for (let k = 0; k < 16; k++) if (((ix >>> (2 * k)) & 3) === 3) { alpha = true; break; } } }
+    const fmt = fcc === 'DXT1' ? (alpha ? THREE.RGBA_S3TC_DXT1_Format : THREE.RGB_S3TC_DXT1_Format) : fcc === 'DXT3' ? THREE.RGBA_S3TC_DXT3_Format : THREE.RGBA_S3TC_DXT5_Format;
+    const t = new THREE.CompressedTexture(mips, w, h, fmt); t.ydAlpha = alpha; return t;
+  }
+
+  // Texture set from one BFX1 .tex/.atx archive (decoded lazily, cached). TexSet.load frees the archive from the VFS cache (the entries are copies);
+  // `free = true` (city sets, drawn by one renderer only) also drops the CPU copy of a decoded texture once it is on the GPU (kept in `freed` for refill).
+  // One TexSet per (vfs, path): every loader shares the parsed index and the texture cache (citstdmat.tex had 3 loaders, carmat.tex 2 + one per plate).
+  const tsCache = new WeakMap(), freedSets = new Set();
   class TexSet {
-    constructor(files) { this.files = files; this.cache = new Map(); }
-    static async load(vfs, path) { return new TexSet(readBFX(await vfs.bytes(path))); }
+    constructor(files) { this.files = files; this.cache = new Map(); this.free = false; this.freed = new Map(); }
+    static load(vfs, path) {
+      let m = tsCache.get(vfs); if (!m) tsCache.set(vfs, m = new Map()); const key = path.toLowerCase();
+      if (!m.has(key)) m.set(key, vfs.bytes(path).then(b => { const ts = new TexSet(readBFX(b)); ts.vfs = vfs; ts.path = path; if (vfs.drop) vfs.drop(path); return ts; }).catch(e => { m.delete(key); throw e; }));
+      return m.get(key);
+    }
+    // WebGL context restored (phones drop it in the background): three re-uploads every texture that still has its pixels; the ones a `free` set dropped
+    // are decoded again from the archive (VFS: HTTP cache or the picked folder) and re-uploaded. onProgress(done, total) per archive.
+    static async refillAll(onProgress) { const l = [...freedSets]; for (let i = 0; i < l.length; i++) { await l[i].refill(); if (onProgress) onProgress(i + 1, l.length); } }
+    async refill() {
+      freedSets.delete(this); if (!this.freed.size || !this.vfs) return;
+      const files = readBFX(await this.vfs.bytes(this.path)), todo = [...this.freed]; if (this.vfs.drop) this.vfs.drop(this.path); this.freed.clear();
+      for (const [k, t] of todo) { const buf = files.get(k); if (!buf) continue; const nt = this._data(k, buf, await decodeImage(k, buf)); t.image = nt.image; t.needsUpdate = true; }
+    }
+    _data(k, buf, img) {   // decoded image -> DataTexture (opaque DXT1 as RGB565)
+      let t;
+      if (!img.alpha && /\.dds$/.test(k) && new DataView(buf).getUint32(84, true) === 0x31545844) {   // opaque DXT1 -> RGB565
+        const n = img.width * img.height, s = img.data, d = new Uint16Array(n);
+        for (let i = 0, o = 0; i < n; i++, o += 4) d[i] = ((s[o] >> 3) << 11) | ((s[o + 1] >> 2) << 5) | (s[o + 2] >> 3);
+        t = new THREE.DataTexture(d, img.width, img.height, THREE.RGBFormat, THREE.UnsignedShort565Type); t.unpackAlignment = 2;
+      } else t = new THREE.DataTexture(img.data, img.width, img.height, THREE.RGBAFormat);
+      return t;
+    }
     has(name) { return this.files.has(name.toLowerCase()); }
+    raw(name) { return this.files.get(name.toLowerCase()) || null; }
     async get(name) {
       const k = name.toLowerCase();
       if (!this.files.has(k)) return null;
       if (this.cache.has(k)) return this.cache.get(k);
-      const p = decodeImage(k, this.files.get(k)).then(img => {
-        const t = new THREE.DataTexture(img.data, img.width, img.height, THREE.RGBAFormat);
-        t.flipY = false; t.generateMipmaps = true; t.minFilter = THREE.LinearMipmapLinearFilter;
+      const buf = this.files.get(k), ct = /\.dds$/.test(k) && buf && s3tc() ? compressedDDS(buf) : null;
+      const p = (ct ? Promise.resolve(ct) : decodeImage(k, buf).then(img => {
+        const t = this._data(k, buf, img);
+        t.generateMipmaps = true; t.ydAlpha = img.alpha; this.files.set(k, null);   // the file bytes are not needed again (context restore: refill() reads the archive again)
+        return t;
+      })).then(t => {
+        t.flipY = false; t.minFilter = THREE.LinearMipmapLinearFilter;
         t.magFilter = THREE.LinearFilter; t.wrapS = t.wrapT = THREE.RepeatWrapping;
-        t.anisotropy = 4; t.ydAlpha = img.alpha; t.needsUpdate = true;
+        t.anisotropy = 4; t.needsUpdate = true;
+        t.onUpdate = () => { t.ydUploaded = true; if (this.free && t.isDataTexture && t.image.data) { t.image = { width: t.image.width, height: t.image.height, data: null }; this.freed.set(k, t); freedSets.add(this); } };
         return t;
       }).catch(e => { console.warn("texture", k, e); (global.YD_ERR = global.YD_ERR || []).push(k + ": " + e); return null; });
       this.cache.set(k, p);
@@ -205,12 +273,14 @@
     return matlist.kids.map(m => {
       const f = new Float32Array(m.data.slice(0, 100));
       const tex = m.kids.find(k => k.type === T.TEXSTAGE);
-      let tname = '';
-      if (tex) { const u = new Uint8Array(tex.data); for (let i = 44; i < Math.min(u.length, 60) && u[i]; i++) tname += String.fromCharCode(u[i]); }
+      let tname = ''; const st = tex ? new Uint8Array(tex.data) : null, b = new Uint8Array(m.data);
+      if (tex) { const u = st; for (let i = 44; i < Math.min(u.length, 60) && u[i]; i++) tname += String.fromCharCode(u[i]); }
       return {
         name: m.name, tex: tname,
         diffuse: [f[2], f[3], f[4], f[5]], ambient: [f[6], f[7], f[8], f[9]],
         specular: [f[10], f[11], f[12], f[13]], emissive: [f[14], f[15], f[16], f[17]], power: f[18],
+        // render-state bytes (FUN_004036e0 copies file 0x4c..0x4f to material+0x18..0x1b) and the stage-0 ADDRESSU/V bytes (3 = CLAMP)
+        flags: new DataView(m.data).getUint32(4, true) >>> 0, alphaRef: b[0x4c], alphaFunc: b[0x4d], srcBlend: b[0x4e], dstBlend: b[0x4f], addrU: st ? st[7] : 1, addrV: st ? st[8] : 1,
       };
     });
   }
@@ -242,25 +312,73 @@
   }
 
   // Build a three.js material for a descriptor. `texset` may be an array of TexSets (searched in order).
-  const matCache = new WeakMap();
+  // ---------- material flag word -> render states, exactly as FUN_00406740 sets them (all device switches at +0x294c.. start at 1, FUN_00406150):
+  // bit25 LIGHTING (off: no material at all, the FVF has no vertex colour -> white * texture), bit26 ALPHATEST (ALPHAREF byte, ALPHAFUNC = 7 GREATEREQUAL in all
+  // data), bit28 ALPHABLEND (SRC/DESTBLEND bytes), bit29 CULL NONE (else CCW = back faces), bit30 ZWRITE, bit31 SPECULARENABLE (only with lighting).
+  // Lit colour = clamp01(E + ambient*Ka + sum Kd*N.L*Ld) per vertex, THEN * texture (D3D fixed function clamps the vertex colour), + specular after the stages.
+  const MFL = { LIT: 1 << 25, ATEST: 1 << 26, BLEND: 1 << 28, TWO: 1 << 29, ZW: 1 << 30, SPEC: 1 << 31 };
+  const D3DBLEND = () => [null, THREE.ZeroFactor, THREE.OneFactor, THREE.SrcColorFactor, THREE.OneMinusSrcColorFactor, THREE.SrcAlphaFactor, THREE.OneMinusSrcAlphaFactor, THREE.DstAlphaFactor, THREE.OneMinusDstAlphaFactor, THREE.DstColorFactor, THREE.OneMinusDstColorFactor];
+  function flagMaterial(d, map) {
+    const fl = (d.flags === undefined ? 0x42000000 : d.flags) >>> 0, lit = !!(fl & MFL.LIT), df = d.diffuse || [1, 1, 1, 1], e = d.emissive || [0, 0, 0, 0];
+    const m = lit ? new THREE.MeshLambertMaterial({ color: new THREE.Color(df[0], df[1], df[2]), emissive: new THREE.Color(e[0], e[1], e[2]) }) : new THREE.MeshBasicMaterial({ color: 0xffffff });
+    m.side = (fl & MFL.TWO) ? THREE.DoubleSide : THREE.FrontSide;
+    m.depthWrite = !!(fl & MFL.ZW);
+    m.opacity = lit ? df[3] : 1;                       // output alpha = diffuse alpha (lit) or vertex alpha 1, times texture alpha
+    if (fl & MFL.BLEND) {
+      m.transparent = true; const B = D3DBLEND(), s = B[d.srcBlend] || THREE.SrcAlphaFactor, t = B[d.dstBlend] || THREE.OneMinusSrcAlphaFactor;
+      if (s !== THREE.SrcAlphaFactor || t !== THREE.OneMinusSrcAlphaFactor) { m.blending = THREE.CustomBlending; m.blendSrc = s; m.blendDst = t; m.blendEquation = THREE.AddEquation; }
+    }
+    if ((fl & MFL.ATEST) && d.alphaRef) m.alphaTest = d.alphaRef / 255;   // GREATEREQUAL: three discards alpha < alphaTest
+    const u = m.userData; u.ydFlags = fl; u.ydAddr = [d.addrU, d.addrV];
+    if (lit) u.ydClamp = 1;
+    if (lit && (fl & MFL.SPEC) && d.specular && d.specular[0] + d.specular[1] + d.specular[2] > 0) { u.ydSpec = [d.specular[0], d.specular[1], d.specular[2]]; u.ydPower = d.power || 0; }
+    if (map) setMap(m, map);
+    ydHooks(m);
+    return m;
+  }
+  // put a texture on a flag material: MODULATE(texture, diffuse) -> colour stays the diffuse; stage-0 ADDRESSU/V 3 = CLAMP (only before the first upload)
+  function setMap(m, tex) {
+    m.map = tex; const a = m.userData.ydAddr;
+    if (a && !tex.ydUploaded) { tex.wrapS = a[0] === 3 ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping; tex.wrapT = a[1] === 3 ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping; }
+    m.needsUpdate = true;
+  }
+  // one shader patch for every flag material: D3D vertex-colour clamp (ydClamp), Gouraud specular (ydSpec), the reflection stage clamp / normal lookup set by
+  // render-orig applyEnvironment (ydEnv, ydNormalFlip) and a per-instance fade attribute for far objects (ydFade, FUN_004192e0)
+  function ydHooks(m) {
+    m.onBeforeCompile = sh => {
+      const u = m.userData; let vs = sh.vertexShader, fs = sh.fragmentShader;
+      if (u.ydEnv) {
+        if (u.ydNormalFlip !== undefined) vs = vs.replace('#include <envmap_vertex>', '#ifdef USE_ENVMAP\n vReflect = transformedNormal * vec3(' + (+u.ydNormalFlip).toFixed(1) + ', 1.0, 1.0);\n#endif');
+        fs = fs.replace('#include <envmap_fragment>', 'outgoingLight = min(outgoingLight, vec3(1.0));\n#include <envmap_fragment>');
+      }
+      if (u.ydClamp) fs = fs.replace('vec3 outgoingLight = reflectedLight.directDiffuse + reflectedLight.indirectDiffuse + totalEmissiveRadiance;',
+        'vec3 outgoingLight = min((vLightFront + vIndirectFront) * RECIPROCAL_PI * diffuse + totalEmissiveRadiance, vec3(1.0));\n#ifdef USE_MAP\n outgoingLight *= texelColor.rgb;\n#endif');   // cull-none faces are lit like front faces in D3D
+      if (u.ydSpec) {
+        sh.uniforms.ydSpecular = { value: new THREE.Color(u.ydSpec[0], u.ydSpec[1], u.ydSpec[2]) }; sh.uniforms.ydPower = { value: u.ydPower };
+        vs = 'uniform vec3 ydSpecular;\nuniform float ydPower;\nvarying vec3 vYdSpec;\n' + vs.replace('#include <lights_lambert_vertex>', '#include <lights_lambert_vertex>\nvYdSpec = vec3(0.0);\n#if NUM_DIR_LIGHTS > 0\nfor (int i = 0; i < NUM_DIR_LIGHTS; i++) { vec3 ydL = directionalLights[i].direction; if (dot(geometry.normal, ydL) > 0.0) vYdSpec += directionalLights[i].color * pow(max(dot(geometry.normal, normalize(ydL + geometry.viewDir)), 0.0), ydPower); }\n#endif\nvYdSpec = min(vYdSpec * ydSpecular, vec3(1.0));');
+        fs = 'varying vec3 vYdSpec;\n' + fs.replace('#include <envmap_fragment>', '#include <envmap_fragment>\noutgoingLight = min(outgoingLight + vYdSpec, vec3(1.0));');
+      }
+      if (u.ydFade) {
+        vs = 'attribute float ydFade;\nvarying float vYdFade;\n' + vs.replace('#include <begin_vertex>', '#include <begin_vertex>\nvYdFade = ydFade;');
+        fs = 'varying float vYdFade;\n' + fs.replace('#include <alphatest_fragment>', 'diffuseColor.a *= vYdFade;\n#include <alphatest_fragment>');
+      }
+      sh.vertexShader = vs; sh.fragmentShader = fs;
+    };
+    m.customProgramCacheKey = () => { const u = m.userData; return 'yd' + (u.ydClamp ? 'c' : '') + (u.ydSpec ? 's' : '') + (u.ydFade ? 'f' : '') + (u.ydEnv ? 'e' + u.ydNormalFlip : ''); };
+    return m;
+  }
+  // copy of a flag material whose alpha is multiplied by `fade` (FUN_00406740 with param < 1: blending forced on, diffuse alpha * fade); `inst` = per-instance
+  // ydFade attribute instead of a fixed opacity
+  function fadeMaterial(m, fade, inst) {
+    const c = m.clone(); c.userData = Object.assign({}, m.userData); c.transparent = true;
+    if (inst) c.userData.ydFade = 1; else c.opacity = m.opacity * fade;
+    return ydHooks(c);
+  }
+
   async function makeMaterial(desc, texsets, opts) {
-    opts = opts || {};
     let map = null;
     if (desc.tex) for (const ts of texsets) { if (ts && ts.has(desc.tex)) { map = await ts.get(desc.tex); break; } }
-    const d = desc.diffuse, e = desc.emissive;
-    const m = new THREE.MeshLambertMaterial({
-      color: map ? 0xffffff : new THREE.Color(d[0], d[1], d[2]),
-      map: map || null,
-      emissive: new THREE.Color(e[0], e[1], e[2]).multiplyScalar(0.8),
-      side: opts.doubleSided ? THREE.DoubleSide : THREE.FrontSide,
-    });
-    const hasA = (map && map.ydAlpha) || d[3] < 0.98;
-    if (hasA) {
-      if (map && map.ydAlpha && d[3] >= 0.98) { m.alphaTest = 0.4; m.transparent = false; }
-      else { m.transparent = true; m.opacity = d[3]; m.depthWrite = false; }
-    }
-    if (desc.name && /glass|stekl/i.test(desc.name)) { m.transparent = true; }
-    return m;
+    return flagMaterial(desc, map);
   }
 
   // Convert a REF scene into a THREE.Group. D3D is left-handed (+Z fwd): we mirror X on the root.
@@ -284,7 +402,17 @@
         else if (k.type === T.MESH) g.add(meshObj(k));
       }
     }
+    function meshGeo(k) {   // geometry (+ material list) of one mesh node; its mesh children are the LOD chain (FUN_00404a00 follows mesh+0x10 `lod` times)
+      const m = readMeshBlob(k.data), geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(m.pos, 3));
+      if (m.hasN) geo.setAttribute('normal', new THREE.BufferAttribute(m.nrm, 3)); else geo.computeVertexNormals();
+      if (m.hasT) geo.setAttribute('uv', new THREE.BufferAttribute(m.uv, 2));
+      geo.setIndex(new THREE.BufferAttribute(m.idx, 1));
+      const list = []; m.subsets.forEach(s => { geo.addGroup(s.start * 3, s.count * 3, list.length); list.push(mats[s.mat] || mats[0] || new THREE.MeshLambertMaterial()); });
+      geo.computeBoundingSphere(); return { geo, list, bounds: m.bounds };
+    }
     function meshObj(k) {
+      const lods = []; for (let n = k.kids.find(c => c.type === T.MESH); n; n = n.kids.find(c => c.type === T.MESH)) lods.push(meshGeo(n));   // _lo, _lo_lo
       const m = readMeshBlob(k.data);
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.BufferAttribute(m.pos, 3));
@@ -296,7 +424,7 @@
       geo.computeBoundingSphere();
       const mesh = new THREE.Mesh(geo, list);
       mesh.name = k.name || '';
-      mesh.userData.bounds = m.bounds;
+      mesh.userData.bounds = m.bounds; if (lods.length) mesh.ydLods = lods;   // [{geo, list, bounds}] for LOD 1, 2 (world.js object LOD; cars do not switch yet). Not in userData: clone() JSON-copies it
       return mesh;
     }
     for (const k of scene.kids) if (k.type === T.FRAME) frame(k, group);
@@ -304,5 +432,5 @@
     return { group: wrap, inner: group, parts, materials: mats, descs };
   }
 
-  global.YD = { VFS, readBFX, decodeDDS, decodeTGA, TexSet, parseRef, readMeshBlob, readMaterials, buildRef, makeMaterial, T };
+  global.YD = { VFS, readBFX, decodeDDS, decodeTGA, TexSet, parseRef, readMeshBlob, readMaterials, buildRef, makeMaterial, flagMaterial, setMap, ydHooks, fadeMaterial, s3tc, MFL, T };
 })(window);

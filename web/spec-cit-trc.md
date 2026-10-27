@@ -159,7 +159,7 @@ Used for car/wall collisions (not drawn).
 #### Path (`FUN_00421150`; 410 total, the AI/road network and race routes)
 
 ```
-u32 a          road class flags: 0x80000000 (260), 0x40000000 (120), 0x20000000 (30)  (main / secondary / minor, guess)
+u32 a          road class flags: 0x80000000 (260), 0x40000000 (120), 0x20000000 (30)  (path+0xc in memory; the minimap FUN_00428c80 draws == 0x80000000 grey, pen 8, == 0x20000000 light blue, pen 6, first->last point; 0x40000000 not drawn)
 u16 nPts       u16 pad
 f32 length     == polyline length of the points (verified)
 f32 width      (3.0 .. ~10.0; lane width / speed hint)

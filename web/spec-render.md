@@ -78,7 +78,7 @@ Camera object `0x4b1188`: mode at +4 (C key cycles; modes 0,1 chase, ≥2 interi
 2. Chase camera max offset length (register `unaff_ESI` in the decompile) – assumed L; mode ≥ 2 selection details (number of views per car, C-key cycle skipping cars without interior).
 3. Lens-flare quad positions along the sun axis; sun visibility occlusion needs the world collision meshes (hook `occluded` in `updateLighting`).
 4. Plate text layout (font draw into the plate texture) and exact plate material swap.
-5. Headlight beam/flare quads (`far_alpha.tga`, `farflare1/2.tga` in every avto.tex; positions come from derived par fields at car+0x300..0x33c written in `FUN_0040ed20`, drawn by `FUN_00410940`); siren (`migalka`, `migr/migb.dds`) not ported.
+5. (Resolved 2026-10-27) There is no headlight flare pass: `far_alpha.tga` / `farflare1/2.tga` are plain body materials (niva, Honda) drawn with the car mesh; `FUN_00410940` is the bound-mesh shadow and car+0x300..0x33c are wheel/axle copies. Siren light bar (`migalka.ref`, `migred`/`migblue`) = `FUN_0040fd20`, ported in carfx.js.
 6. Billboard sprites (CIT object types 3/6) go through `FUN_00406a70(dev, material, pos, w, h, rot, …)`; size is read from material dwords – not re-verified here.
 7. `SetTransform(0x100 = world)` after each block uses an identity matrix (`dev+0x2c74`).
 
