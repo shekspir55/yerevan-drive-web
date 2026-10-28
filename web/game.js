@@ -115,7 +115,7 @@
     let hi = false; const t = setInterval(() => { hi = !hi; o.frequency.value = hi ? 960 : 720; }, 450); sirens.set(key, { o, g, t });
   }
   function toggleSiren() {
-    const on = !sirens.has('me'); setSiren('me', on); G.player.siren = on;
+    const on = !G.player.siren; setSiren('me', on); G.player.siren = on;   // the flag (+0x6d) is the state; the sound follows it (no audio context: flag only)
     if (G.net) G.net.sendSiren(on);
   }
   function updateSirens() {
@@ -488,7 +488,7 @@
     let net = null, welcome = null;
     if (state.net) {   // multiplayer: join/create the session first (room settings decide track, laps and game type)
       const d = state.net.d, create = state.net.action === 'create';
-      net = new YDNet({ team: new URLSearchParams(location.search).get('team') || undefined, name: d.name || 'Player', session: create ? undefined : d.session, password: d.password || '', car: state.selected, col: state.color, plate: state.plate || (UI && UI.settings ? { type: UI.settings.plateType, text: UI.settings.plateText } : null), create: create ? { session: d.session, maxPlayers: +d.maxPlayers, gameType: d.gameType, laps: d.laps, password: d.password } : undefined }, {});
+      net = new YDNet({ team: new URLSearchParams(location.search).get('team') || undefined,   /* ?team=g|m: TEST AID only (server keeps it at the random draw); the original has no team choice */ name: d.name || 'Player', session: create ? undefined : d.session, password: d.password || '', car: state.selected, col: state.color, plate: state.plate || (UI && UI.settings ? { type: UI.settings.plateType, text: UI.settings.plateText } : null), create: create ? { session: d.session, maxPlayers: +d.maxPlayers, gameType: d.gameType, laps: d.laps, password: d.password } : undefined }, {});
       await msg('Connecting…'); welcome = await net.ready;
       state.opts.track = welcome.room.track; state.opts.laps = welcome.room.laps; state.mode = welcome.room.gameType === 1 ? 'gonka' : 'walker'; state.gm = welcome.room.gameType === 2 ? { team: welcome.team } : null;
     }
@@ -551,15 +551,28 @@
       const addRemote = async peer => {
         if (net.remote.has(peer.id)) return; const c = await YDCar.loadCar(vfs, state.carNames[peer.car] ? peer.car : 'bmw', peer.col, state.carcol); if (net.remote.has(peer.id)) return;   // a reconnect can announce a player twice
         scene.add(c.obj); if (UI) applyPlate(c, UI, peer.plate ? peer.plate.type : (Math.random() * 10) | 0, peer.plate && peer.plate.text ? peer.plate.text : randPlate()); if (R && envCube) R.applyEnvironment(c.obj, envCube, R.C.REFLECT_MAX * 0.6);   // every car carries a plate
-        const e = { team: peer.team, id: 'n' + peer.id, name: peer.name, car: c, phys: YDCar.makePhysics(c, world), remote: true, live: false };   // a full physics body like the AI (spec-collision-camera.md B): simulated with the sender's inputs (e.inp), corrected per packet (net.js); live after its first packet
+        const e = { team: peer.team || null, chosen: !!peer.chosen, nid: peer.id, id: 'n' + peer.id, name: peer.name, car: c, phys: YDCar.makePhysics(c, world), remote: true, live: false };   // a full physics body like the AI (spec-collision-camera.md B): simulated with the sender's inputs (e.inp), corrected per packet (net.js); live after its first packet
         if (shadowOn) e.shadow = YDSim.makeShadow(c, scene);
         net.remote.set(peer.id, e); remotes.push(e);
+        if (state.gm) { applyTeam(e); if (peer.siren && e.team === 'm') { e.siren = true; setSiren(e.id, true); } }   // joined / rejoined after the start: its team and siren as the server has them
         if (race) { Object.assign(e, { lap: -9, idx: -1, progress: 0, done: false, time: null, ext: true }); race.entries.push(e); }   // ext: its finish comes from its owner ('fin'), not from this copy
       };
-      if (state.gm) { player.team = state.gm.team; }
+      if (state.gm) { player.team = state.gm.team; applyTeam(player); }   // null until the host's start draws it (a reconnect keeps it)
       net.hooks.onJoin = addRemote;
       net.hooks.onSiren = m => setSiren('n' + m.id, m.on);
-      net.hooks.onGo = () => { if (G) G.spawnSlot(net.slot); if (G && G.lobby) leaveLobby(); };   // everybody to the grid slot the server gave out with the start message
+      net.hooks.onGo = m => {   // the host's start message (message 4, net2.c case 4 -> FUN_00429b00): teams, start slot, Gogh & Milica spawn; then the countdown
+        if (!G) return;
+        if (state.gm && m.teams) {   // record +0x78: police (1) / robber (0), drawn by the host (FUN_0042b4f0); players left out of the start have none
+          const tm = id => m.teams[id] === 'g' || m.teams[id] === 'm' ? m.teams[id] : null;
+          G.player.team = state.gm.team = tm(net.id); for (const [id, r] of net.remote) r.team = tm(id);
+          for (const e of [G.player, ...G.remotes]) { applyTeam(e); const on = e.team === 'm'; e.siren = on; setSiren(e === G.player ? 'me' : e.id, on); }   // police: +0x6d = 1 at spawn (siren and light bar on), yd.c 29435
+        }
+        const sp = state.gm && Array.isArray(m.sp) && m.sp[net.slot];
+        if (sp && !m.out) { const e = G.player; putOn(e, { pos: new THREE.Vector3(sp[0], sp[1], sp[2]), yaw: sp[3] }); e.phys.vel.set(0, 0, 0); e.phys.speed = 0; e.phys.yawRate = 0; }   // FUN_00414690 spawn of this start slot
+        else G.spawnSlot(net.slot);   // other game types: the grid slot from the start message
+        if (G.lobby && !m.out) leaveLobby();   // left out (no CHOICE CAR): stays on GMCar (INFERRED from yd.c 30560); GO TO CITY then drives in like a late joiner
+      };
+      net.hooks.onNoStart = () => { const b = state.ui && state.ui.screens.get(0x38).find(0x11); if (b) b.setEnabled(false); if (Q0.has('autogo') && G && G.lobby) setTimeout(mpGoNow, 1000); };   // (autogo test aid: try again) the server refused GO TO CITY: fewer than 2 players chose a car
       net.hooks.onRestart = () => { if (G) netRestart(); };
       net.hooks.onPleaseRestart = m => netMsg(m.name + ' ' + UI.S('STRINGS', 'PleaseRestart', 'please restart'), 255);   // host: message 10 -> FUN_004294c0 "%s %s", FUN_00427350(.., 0, 0, 255)
       net.hooks.onClose = () => { if (G) netMsg(UI.S('STRINGS', 'Server', 'Server is down!'), 0, 0xffffff); };   // connection lost: net.js reconnects with the same id for ~55 s
@@ -577,7 +590,7 @@
         const c = await YDCar.loadCar(vfs, state.carNames[m.car] ? m.car : 'bmw', m.col, state.carcol);
         scene.remove(e.car.obj); if (e.shadow) scene.remove(e.shadow.group);
         scene.add(c.obj); if (UI && m.plate) applyPlate(c, UI, m.plate.type, m.plate.text || randPlate()); if (R && envCube) R.applyEnvironment(c.obj, envCube, R.C.REFLECT_MAX * 0.6);
-        e.car = c; e.phys = YDCar.makePhysics(c, world); e.inp = null; e.live = false; if (shadowOn) e.shadow = YDSim.makeShadow(c, scene);   // new par (mass, wheels, box): the next packet snaps the new body
+        e.car = c; e.phys = YDCar.makePhysics(c, world); e.inp = null; e.live = false; e.chosen = true; applyTeam(e); if (shadowOn) e.shadow = YDSim.makeShadow(c, scene);   // message 2: info +0 = 1 (chosen)   // new par (mass, wheels, box): the next packet snaps the new body
       };
       net.hooks.onChat = m => chatLine(armToU(m.name) + ': ' + m.text);
       setupChat(net);
@@ -670,7 +683,8 @@
   function netRestart() {
     const UI = state.ui; G.report = null; G.resShown = false; G.finSent = false; G.netOrder = null; G.netMsgs = []; if (G.paused) setPaused(false);
     if (G.race) G.race = new YDSim.Race(G.world, G.route, G.race.laps, G.race.entries, G.player);
-    if (G.gm) { G.gm = { t: 0, over: null, msgs: [], meters: new Map() }; for (const e of [G.player, ...G.remotes]) e.busted = false; stopSirens(); }
+    if (G.gm) { G.gm = { t: 0, over: null, msgs: [], meters: new Map() }; for (const e of [G.player, ...G.remotes]) { e.busted = false; e.team = null; e.siren = false; e.police = false; applyTeam(e); } state.gm.team = null; stopSirens(); if (G.carFx) G.carFx.update(0, [G.player, ...G.remotes], G.camera, null); }   // the lobby frame does not run carFx: drop the light bars / lights now   // message 5: teams unknown until the next GO TO CITY draws them
+    for (const r of G.remotes) r.chosen = false;   // net2.c case 5: every player's info +0 = 0, all choose again
     G.spawnSlot(G.net.slot); if (UI.overlay) UI.closeOverlay(); enterLobby();
   }
   // network game with the in-game menu or report open: the world keeps running (your car stands, the host keeps sending traffic, the chase clock runs)
@@ -680,7 +694,7 @@
     G.net.sendState(dt, G.phys, G.netInp); G.net.updateRemote(dt); for (const r of G.remotes) YDSim.placeCar(r, dt, world); trafficShadows();
   }
   // host: start the game for everybody; other players: wait for the host (the button used to do nothing)
-  function mpGoNow() { const n = G.net; if (!n) return; if (n.goAt) { leaveLobby(); return; } if (n.isHost) n.sendStart(); else { const b = state.ui.screens.get(0x38).find(0x11); if (b) b.setEnabled(false); } }   // non-host: button greys out until the host starts (go -> leaveLobby)
+  function mpGoNow() { const n = G.net; if (!n) return; if (n.goAt) { leaveLobby(); return; } if (n.isHost) n.sendStart(G.gm ? { sp: gmSpawns(G.world) } : null); else { const b = state.ui.screens.get(0x38).find(0x11); if (b) b.setEnabled(false); } }   // non-host: button greys out until the host starts (go -> leaveLobby)
   function leaveLobby() {
     const UI = state.ui, cv = $('uicanvas'); G.lobby = false; G.camEnt = null; if (G.chase) G.chase.init = false; UI.lobbyCanGo = false; UI.closeOverlay(); cv.style.display = 'none';   // start: the camera follows the own car again (FUN_00417240, mode 0)
     $('hud').style.display = 'block'; if (G.world.pathLines) $('minimap').style.display = 'block'; if (G.race) $('race').style.display = 'block';
@@ -706,7 +720,27 @@
     const fwd = new THREE.Vector3(Math.sin(phys.yaw), 0, Math.cos(phys.yaw));
     camera.position.copy(phys.pos).addScaledVector(fwd, -9).add(new THREE.Vector3(0, 3.2, 0)); camera.lookAt(phys.pos.x, phys.pos.y + 1, phys.pos.z);
     renderer.render(scene, camera);
-    state.ui.overlayFrame(dt);
+    lobbyGoButton(); state.ui.underlay = lobbyList; state.ui.overlayFrame(dt); state.ui.underlay = null;
+  }
+  // GO TO CITY (0x11): FUN_00426f00 enables it only on the host, once a player other than the one who just chose has also chosen = 2 players with a car
+  // (yd.c 27381-27393); the other players never get it. Port: also on when the game already runs (late joiner / left out of the start: drive in).
+  function lobbyGoButton() {
+    const n = G.net, b = state.ui && state.ui.screens.get(0x38).find(0x11); if (!n || !b) return;
+    const chosen = (G.lobbyChosen ? 1 : 0) + G.remotes.filter(r => r.chosen).length, on = !!n.goAt || (!!n.isHost && chosen >= 2);
+    b.setEnabled(on); state.ui.lobbyCanGo = on;
+  }
+  // player list while nobody has started (asm 0x428460, FUN_00428460, drawn before the GMCar screen): row i at y = 0.07*i - 0.95, small font 0.06,
+  // name white at x -0.99, then at x -0.65 the chosen car's name in its paint colour (info +0x10..0x1c as ARGB) or [STRINGS] NotChoiced in white
+  function lobbyList(R) {
+    const UI = state.ui, n = G.net; if (!UI || !n || n.goAt) return;   // +0x84d == 0 and +0xafc == 0: before GO TO CITY only
+    const clean = s => String(s || '').replace(/[^\x20-\xff]/g, '');
+    const rows = [{ id: n.id, name: n.hello.name, chosen: G.lobbyChosen, car: G.car }, ...G.remotes.map(r => ({ id: r.nid, name: r.name, chosen: r.chosen, car: r.car }))].sort((a, b) => a.id - b.id);   // INFERRED order: the player list in join order
+    rows.forEach((e, i) => {
+      const y = 0.07 * i - 0.95;
+      R.text(UI.fontSmall, -0.99, y, 0.06, 0.06, 0xffffffff, clean(e.name), 8);
+      if (e.chosen) R.text(UI.fontSmall, -0.65, y, 0.06, 0.06, paintARGB(e.car), state.carNames[e.car && e.car.folder] || '', 8);
+      else R.text(UI.fontSmall, -0.65, y, 0.06, 0.06, 0xffffffff, UI.S('STRINGS', 'NotChoiced', 'Not chosen'), 8);
+    });
   }
   // CHOICE CAR: load the chosen model, give it its own physics, and tell the others
   async function swapPlayerCar() {
@@ -717,8 +751,8 @@
     if (G.R && G.dynEnv) G.R.applyEnvironment(nc.obj, G.dynEnv.texture, G.R.C.REFLECT_MAX);
     if (G.player.shadow) { G.scene.remove(G.player.shadow.group); G.player.shadow = YDSim.makeShadow(nc, G.scene); }
     G.car = nc; G.phys = np; G.player.car = nc; G.player.phys = np; state.selected = folder; state.color = color; state.plate = plate; state.auto = auto;
-    G.lobbyChosen = true; G.net.sendCar({ car: folder, col: color, plate, auto });
-    if (G.net.isHost || G.net.goAt) { state.ui.lobbyCanGo = true; const b = state.ui.screens.get(0x38).find(0x11); if (b) b.setEnabled(true); }   // GO TO CITY unlocks after the first choice
+    G.lobbyChosen = true; G.net.sendCar({ car: folder, col: color, plate, auto }); applyTeam(G.player);
+    lobbyGoButton();
   }
   function restartUrl() {
     const o = state.opts || {};
@@ -916,7 +950,7 @@
       else if (race.t < 1) { c.style.display = 'block'; c.textContent = 'GO!'; } else c.style.display = 'none';
       if (player.done && !G.resShown && (G.net ? G.net.isHost && race.entries.every(e => e.done) && phys.vel.length() < 0.2 : phys.vel.length() < 0.2 || (DEMO && race.t - race.finishedAt > 2.5))) { G.resShown = true; if (G.net) G.net.send({ t: 'over', order: race.standings().map(netIdOf) }); showResults(); }   // network: the host decides (FUN_0042b190 sends 0x12 only from the host) and its finish order goes to everybody   // single race (FUN_00427cd0): report once your finished car stands (< 0.2 m/s); network race (FUN_00427e00): also waits until every racer is in (spectator camera meanwhile)
     }
-    if (G.mini) { const mk = Math.min(innerHeight, innerWidth) / 768, mc = $('minimap'); mc.style.width = 205 * mk + 'px'; mc.style.height = 205 * mk + 'px'; if (!state.ui || state.ui.settings.showMap) G.mini.draw(world, phys, race, ais, traffic, { ents: [player, ...ais, ...(G.remotes || [])], color: e => paintARGB(e.car), gm: !!G.gm, siren: e => e === player ? !!player.siren : sirens.has(e.id), t: G.t }); else mc.style.display = 'none'; }
+    if (G.mini) { const mk = Math.min(innerHeight, innerWidth) / 768, mc = $('minimap'); mc.style.width = 205 * mk + 'px'; mc.style.height = 205 * mk + 'px'; if (!state.ui || state.ui.settings.showMap) G.mini.draw(world, phys, race, ais, traffic, { ents: [player, ...ais, ...(G.remotes || [])], color: e => paintARGB(e.car), gm: !!G.gm, siren: e => !!e.siren, t: G.t }); else mc.style.display = 'none'; }
     if (G.carFx) { // light bar on police cars (Gogh & Milica team 'm' = ctrl+0x6c), lights while the siren is on (+0x6d); ?migalka=1 forces it on the player
       const dbg = Q0.has('migalka'); if (dbg) { player.police = true; player.siren = Q0.get('migalka') !== '0'; } else player.police = !!G.gm && player.team === 'm';
       for (const r of G.remotes || []) r.police = !!G.gm && r.team === 'm';
@@ -944,6 +978,33 @@
   // ---- Gogh & Milica (game type 4; FUN_00428xxx): cops (flag +0x6c) vs robbers; a robber's meter (+0x70, starts 1.0) drains at 0.1/s while a live cop is
   // within 7 m and the relative speed is < 10 m/s, otherwise recovers at 0.01/s; at 0 the robber is busted. All robbers busted -> police win; the 300 s timer
   // (game+0xfbc = 300.0) running out -> the robbers win. HUD: panel + "Elapsed time m:ss" (FUN_00427790).
+  // team effects of FUN_00429b00 (yd.c 29433-29439): police (+0x6c = 1) get car +0x1dc = 1.8 (engine torque x1.8, asm 0x413841), robbers keep 1.0
+  function applyTeam(e) { if (e && e.phys) e.phys.torqueMul = state.gm && e.team === 'm' ? 1.8 : 1; }
+  // Gogh & Milica start positions (FUN_00414690, host only): 8 different random city blocks; in each a random path whose class flags are exactly 0x40000000
+  // (FUN_00423310), at the point of it nearest to the block's sphere centre (FUN_00421410), 0.5 m up (0.5 @0x483310), facing along that segment
+  // (yaw = atan2(dx, dz) in D3D, |dx| < 0.01 -> 0.01). Port space: x' = -x, yaw' = -yaw. Returns [[x, y, z, yaw] x 8] or null.
+  function gmSpawns(world) {
+    const bl = world && world.cit && world.cit.blocks; if (!bl || !bl.length) return null;
+    const ok = bl.map(b => b.paths.filter(p => p.flags === 0x40000000 && p.pts.length >= 6));
+    const nOk = ok.filter(a => a.length).length; if (!nOk) return null;
+    const used = [], out = [];
+    for (let guard = 0; out.length < Math.min(8, nOk) && guard < 100000; guard++) {
+      const b = Math.random() * bl.length | 0; if (used.includes(b) || !ok[b].length) continue;
+      const pa = ok[b][Math.random() * ok[b].length | 0], P = pa.pts, c = bl[b].sphere;
+      let best = 1e6, bp = null, bk = 0;
+      for (let k = 0; k < P.length / 3 - 1; k++) {   // FUN_00405540: closest point on segment k
+        const ax = P[k * 3], ay = P[k * 3 + 1], az = P[k * 3 + 2], dx = P[k * 3 + 3] - ax, dy = P[k * 3 + 4] - ay, dz = P[k * 3 + 5] - az, L = dx * dx + dy * dy + dz * dz;
+        const t = L > 0 ? Math.max(0, Math.min(1, ((c[0] - ax) * dx + (c[1] - ay) * dy + (c[2] - az) * dz) / L)) : 0, q = [ax + dx * t, ay + dy * t, az + dz * t];
+        const d = Math.hypot(c[0] - q[0], c[1] - q[1], c[2] - q[2]); if (d < best) { best = d; bp = q; bk = k; }
+      }
+      if (!bp) continue;
+      let dx = P[bk * 3 + 3] - P[bk * 3], dz = P[bk * 3 + 5] - P[bk * 3 + 2]; const l = Math.hypot(dx, P[bk * 3 + 4] - P[bk * 3 + 1], dz) || 1; dx /= l; dz /= l;
+      if (Math.abs(dx) < 0.01) dx = 0.01;
+      const yaw = Math.atan2(dx, dz), r3 = v => Math.round(v * 1e3) / 1e3;
+      out.push([r3(-bp[0]), r3(bp[1] + 0.5), r3(bp[2]), r3(-yaw)]); used.push(b);
+    }
+    return out.length ? out : null;
+  }
   function stepGM(dt) {
     const gm = G.gm; if (gm.over) { if (!gm.shown) { gm.shown = true; showGMEnd(); } return; }   // FUN_00427fc0: game over -> report screen, stays until RESTART / MAIN MENU / EXIT
     if (G.net && G.net.countdown() > 0) return;   // chase starts at the shared start time
@@ -971,6 +1032,11 @@
     const gm = G.gm, sec = Math.floor(Math.max(0, 300 - gm.t));   // FUN_00427790 prints game+0xfbc, the 300 s clock counting DOWN (min = ftol(t/60), s = ftol(t - min*60)), under the label ElapsedTime
     const T = G.net ? G.net.countdown() : 0;   // same 3-2-1-Go countdown as the race (FUN_004285c0), on the shared multiplayer clock
     if (T > -0.8 && T < 4) { const idx = Math.max(0, Math.floor(T)), sz = 0.05 + (Math.max(0, T) - idx) * 0.12, str = idx === 0 ? UI.S('STRINGS', 'Go', 'Go') : String(idx); R.text(UI.fontBig, 0, 0, sz, sz, 0xffffffff, str, 0xb); }
+    if (G.player.team === 'g') {   // FUN_00427690: own car a robber (+0x6c == 0): meter +0x70 as a bar at (-0.2, -0.97), 0.4 x 0.05, background 0x50000000, fill ARGB (0xb4, (1-m)*255, m*255, 0): green full, red empty
+      const m = Math.max(0, Math.min(1, gm.meters.has(G.player) ? gm.meters.get(G.player) : 1));
+      R.sprite(null, -0.2, -0.97, 0.4, 0.05, 0x50000000);
+      R.sprite(null, -0.2, -0.97, m * 0.4, 0.05, ((0xb4 << 24) | (((1 - m) * 255 | 0) << 16) | ((m * 255 | 0) << 8)) >>> 0);
+    }
     R.sprite(null, 0.35, -1.0, 0.65, 0.1, 0x9632325a);
     R.text(UI.fontBig, 0.38, -0.98, 0.07, 0.07, 0xffff7d7d >>> 0, UI.S('STRINGS', 'ElapsedTime', 'Elapsed time') + ' ' + Math.floor(sec / 60) + ':' + (sec % 60 < 10 ? '0' : '') + sec % 60, 8);
   }

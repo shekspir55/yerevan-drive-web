@@ -112,9 +112,11 @@ function onMsg(c, m) {
     }
     c.room = room; room.members.add(c); if (!room.host || !room.members.has(room.host)) room.host = c;
     c.slot = back && ![...room.members].some(x => x !== c && x.slot === back.slot) ? back.slot : freeSlot(room, c);   // start grid slot inside this room (0..7), not the server-wide client id
-    // Gogh & Milica: the player may ask for a team ('g' = robber/Goxer, 'm' = police/Milicaner); default: the first player is a robber, the rest police
-    const team = back ? back.info.team : (m.team === 'g' || m.team === 'm') ? m.team : (others(c).some(x => x.info.team === 'g') ? 'm' : 'g');
-    c.info = back ? back.info : { id: c.id, name: String(m.name || 'Player').slice(0, 24), car: carOf(m.car, 'bmw'), col: colOf(m.col), plate: plateOf(m.plate), team };
+    // Gogh & Milica: nobody picks a team; the host's GO TO CITY draws them (FUN_0042b4f0, see 'start'). Until then the team is unknown (null).
+    // m.team ('g' robber / 'm' police, from ?team=) is only a TEST AID: that player keeps the asked team at the draw (DEVIATION, never sent by the normal UI)
+    c.forceTeam = back ? back.forceTeam : (m.team === 'g' || m.team === 'm') ? m.team : null;
+    c.info = back ? back.info : { id: c.id, name: String(m.name || 'Player').slice(0, 24), car: carOf(m.car, 'bmw'), col: colOf(m.col), plate: plateOf(m.plate), team: null, chosen: false };   // chosen = info +0 (CHOICE CAR done, message 2)
+    const team = c.info.team;
     c.token = crypto.randomBytes(12).toString('hex');
     send(c, { t: 'welcome', id: c.id, team, slot: c.slot, host: room.host === c, token: c.token, resumed: !!back, room: { session: room.session, gameType: room.gameType, laps: room.laps, track: room.track, started: room.started, untilGo: room.started ? (room.goAt - Date.now()) / 1000 : null }, peers: others(c).map(x => x.info) });
     for (const o of others(c)) send(o, { t: 'join', peer: c.info });
@@ -126,18 +128,30 @@ function onMsg(c, m) {
     if (!nums(m.p, 4, 12, 1e4) || (m.q !== undefined && !okBody(m.q))) return;
     for (const o of others(c)) send(o, { t: 's', id: c.id, p: m.p, q: m.q, l: fin(m.l, 5) ? m.l : 0 });
   } else if (m.t === 'car') {   // CHOICE CAR: the player picked a car/colour/plate (original FUN_00429420 -> network message)
-    c.info.car = carOf(m.car, c.info.car); c.info.col = colOf(m.col); c.info.plate = plateOf(m.plate); c.info.auto = m.auto !== false;
+    c.info.car = carOf(m.car, c.info.car); c.info.col = colOf(m.col); c.info.plate = plateOf(m.plate); c.info.auto = m.auto !== false; c.info.chosen = true;   // net2.c case 2: info +0 = 1
     for (const o of others(c)) send(o, { t: 'car', id: c.id, car: c.info.car, col: c.info.col, plate: c.info.plate });
-  } else if (m.t === 'start') {   // GO TO CITY (host only): the game starts for everybody, 3-2-1-Go after 6 s
-    if (c.room.host !== c || c.room.started) return;
-    c.room.started = true; c.room.goAt = Date.now() + 6000;
-    // spawn slots for the start (original FUN_00426e80: the host's start message carries them): robbers first, so in Gogh & Milica no cop starts next to a robber
-    const order = [...c.room.members].sort((a, b) => ((a.info.team === 'g' ? 0 : 1) - (b.info.team === 'g' ? 0 : 1)) || a.slot - b.slot), slots = {};
-    order.forEach((x, i) => { x.slot = i; slots[x.id] = i; });
-    for (const o of c.room.members) send(o, { t: 'go', in: 6, slot: o.slot, slots });
+  } else if (m.t === 'start') {   // GO TO CITY (host only): FUN_00426e80 -> start message 4 (FUN_0042b4f0); 3-2-1-Go after 6 s
+    const room = c.room; if (room.host !== c || room.started) return;
+    // only the players who pressed CHOICE CAR take part (records with info +0 != 0, yd.c 30560); the host's button is enabled only once 2 have (FUN_00426f00, yd.c 27381-27393)
+    const inc = [...room.members].filter(x => x.info.chosen).sort((a, b) => a.slot - b.slot);
+    if (inc.length < 2) return send(c, { t: 'nostart', need: 2, have: inc.length });
+    room.started = true; room.goAt = Date.now() + 6000;
+    const slots = {}; inc.forEach((x, i) => { x.slot = i; slots[x.id] = i; });   // record order +0x31 = start slot / spawn index
+    let n = inc.length; for (const x of room.members) if (!inc.includes(x)) { x.slot = n++ & 7; x.info.team = null; x.info.siren = false; }   // left out of the start: no team (stays on GMCar; may drive in later like a late joiner)
+    for (const r of resumes.values()) if (r.room === room) { r.info.team = null; r.info.siren = false; }   // dropped players waiting to reconnect were not in this draw either
+    const o = { t: 'go', in: 6, slots };
+    if (room.gameType === 2) {   // Gogh & Milica (original type 4): every included player police (record +0x78 = 1), then floor(n/2) distinct random ones robbers (yd.c 30595-30615)
+      for (const x of inc) x.info.team = x.forceTeam || 'm';
+      let g = inc.filter(x => x.info.team === 'g').length; const free = inc.filter(x => !x.forceTeam);
+      while (g < inc.length >> 1 && free.length) { free.splice(Math.random() * free.length | 0, 1)[0].info.team = 'g'; g++; }
+      o.teams = {}; for (const x of inc) { o.teams[x.id] = x.info.team; x.info.siren = x.info.team === 'm'; }   // police: siren / light bar on from the spawn (+0x6d = 1, FUN_00429b00 yd.c 29435)
+      if (Array.isArray(m.sp) && m.sp.length <= 8 && m.sp.every(e => nums(e, 4, 4, 1e4))) o.sp = m.sp;   // the host's random block spawns (FUN_00414690), [x, y, z, yaw] per start slot
+    }
+    for (const x of room.members) send(x, Object.assign({}, o, { slot: x.slot, out: !inc.includes(x) }));
   } else if (m.t === 'restart' || m.t === 'pleaserestart') {   // RESTART GAME (GMMain 0x32, host only: message 5, everybody back to the car choice, then a new start); PLEASE RESTART GAME (0x33, the others: message 10 to the host)
     if (c.room.host !== c || m.t === 'pleaserestart') { if (c.room.host !== c) send(c.room.host, { t: 'pleaserestart', id: c.id, name: c.info.name }); return; }
     c.room.started = false; c.room.goAt = 0;
+    for (const o of [...c.room.members, ...[...resumes.values()].filter(r => r.room === c.room)]) { o.info.chosen = false; o.info.team = null; o.info.siren = false; }   // (also players waiting to reconnect) message 5 (net2.c case 5: info +0 = 0): everybody chooses again, the next GO TO CITY draws new teams
     for (const o of c.room.members) send(o, { t: 'restart' });
   } else if (m.t === 'tr') {   // the host simulates the NPC traffic and relays it, so every player sees (and collides with) the same cars
     if (c.room.host !== c || !okTr(m.c)) return;
@@ -167,7 +181,7 @@ function drop(c) {
   const room = c.room; if (!room) return;
   for (const o of others(c)) send(o, { t: 'leave', id: c.id });
   room.members.delete(c); c.room = null;
-  if (c.token && c.info) resumes.set(c.token, { id: c.id, info: c.info, slot: c.slot, room, until: Date.now() + 60000 });   // may come back with the same id (net.js reconnect)
+  if (c.token && c.info) resumes.set(c.token, { id: c.id, info: c.info, slot: c.slot, forceTeam: c.forceTeam, room, until: Date.now() + 60000 });   // may come back with the same id (net.js reconnect)
   if (room.host === c && room.members.size) setHost(room, [...room.members].find(x => !x.hidden) || [...room.members][0]);   // the next (visible) player becomes the host
   if (!room.members.size) { room.host = null; room.emptyAt = Date.now(); }   // an empty game leaves the list at once and is deleted after 60 s (kept for a reconnect)
 }

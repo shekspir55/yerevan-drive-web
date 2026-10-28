@@ -79,6 +79,7 @@
       this.yaw = 0; this.yawRate = 0; this.steer = 0; this.speed = 0;
       this.gear = 1; this.rpm = par.idleRpm; this.pitch = 0; this.roll = 0; this.slip = 0; this.wheelSpin = 0;
       this.throttle = 0; this.brake = 0; this.handbrake = false;
+      this.torqueMul = 1;              // car+0x1dc engine torque multiplier (init 1.0 at 0x413264; Gogh & Milica police 1.8, FUN_00429b00 yd.c 29437)
       this.autoShift = opts.transmission === 0 ? false : true;
       this.gy = 0;                     // ground height used when no ground function is set (and updated from wheel contacts)
       this.ground = opts.groundFn || null; // ground(x3, z3, refY) -> y | null  (three.js space)
@@ -291,7 +292,7 @@
       if (this._shiftT >= 0) { this._shiftT -= dt; if (this._shiftT < 0 && this._idxCur !== this._idxTgt) this._idxCur = this._idxTgt; }
       this._brakeT = this._brk ? par.brakeTorque : 10;               // car+0x1a0: wheel brake torque (10 N*m drag when not braking)
       let T = -par.engineBrake;                                       // car+0x1c4
-      if (this._gas) T = this._torque(this._eOmega) * this._thr;
+      if (this._gas) T = this._torque(this._eOmega) * this._thr * this.torqueMul;   // fmul [esi+0x1dc] (asm 0x413841); engine braking is not scaled
       const gi = this._idxCur, fin = par.finalDrive;
       let implied = this._driveOmega * fin * par.ratios[gi];
       if (gi === 0) implied *= -1;

@@ -66,6 +66,7 @@
         else if (m.t === 'go') { this.goAt = performance.now() + m.in * 1000; if (m.slot !== undefined) this.slot = m.slot; hooks.onGo && hooks.onGo(m); }
         else if (m.t === 'restart') { this.goAt = 0; hooks.onRestart && hooks.onRestart(m); }
         else if (m.t === 'pleaserestart') hooks.onPleaseRestart && hooks.onPleaseRestart(m);
+        else if (m.t === 'nostart') hooks.onNoStart && hooks.onNoStart(m);   // GO TO CITY refused: fewer than 2 players chose a car (FUN_00426f00)
         else if (m.t === 'host') { const was = this.isHost; this.isHost = m.id === undefined || m.id === this.id; if (this.isHost && !was) hooks.onHost && hooks.onHost(); else if (!this.isHost && was) hooks.onUnhost && hooks.onUnhost(); }   // host migration (left / tab hidden)
         else if (m.t === 'bust') hooks.onBust && hooks.onBust(m.id);
         else if (m.t === 'over') hooks.onOver && hooks.onOver(m);
@@ -89,7 +90,7 @@
     sendCar(c) { if (this.ws.readyState === 1) this.ws.send(JSON.stringify({ t: 'car', car: c.car, col: c.col, plate: c.plate, auto: c.auto })); }
     sendTraffic(list) { if (this.ws.readyState === 1) this.ws.send(JSON.stringify({ t: 'tr', c: list, l: R3(this.half) })); }
     sendRestart() { if (this.ws.readyState === 1) this.ws.send(JSON.stringify({ t: 'restart' })); }
-    sendStart() { if (this.ws.readyState === 1) this.ws.send(JSON.stringify({ t: 'start' })); }
+    sendStart(extra) { if (this.ws.readyState === 1) this.ws.send(JSON.stringify(Object.assign({ t: 'start' }, extra || {}))); }   // extra.sp: Gogh & Milica spawns from the host (FUN_00414690)
     sendChat(text) { if (this.ws.readyState === 1) this.ws.send(JSON.stringify({ t: 'chat', text })); }
     sendSiren(on) { if (this.ws.readyState === 1) this.ws.send(JSON.stringify({ t: 'siren', on: !!on })); }
     send(o) { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(o)); }   // pleaserestart / bust / over / fin (server.js checks who may send what)

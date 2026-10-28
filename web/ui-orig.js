@@ -647,7 +647,7 @@
     }
     draw() {                                                                                 // FUN_00430c70
       const r = this.r, ctx = this.ctx; if (!this.cur) return;
-      if (this.overlay) ctx.clearRect(0, 0, W, H);                                            // in-game: items only, over the 3D scene
+      if (this.overlay) { ctx.clearRect(0, 0, W, H); if (this.underlay) this.underlay(r); }   // in-game: items only, over the 3D scene; underlay = game text drawn before the screen (network player list FUN_00428460 runs before FUN_00430ef0)
       else {
         ctx.fillStyle = '#646464'; ctx.fillRect(0, 0, W, H);                                 // clear colour 0xff646464
         const t = this.t, fl = this.mat.fl && this.mat.fl.frames[0];                        // two drifting glow sprites behind the bg
@@ -927,7 +927,7 @@
     gc.add(new TextButton(ui, 0x34, 0x40000000, big, 0, 0.61, 0.3, 0.064, S('ALL', 'MainMenu', 'MAIN MENU'), ui.sndButton));
     gc.add(new TextButton(ui, 1, 0x40000000, big, 0, 0.71, 0.3, 0.064, S('ALL', 'ExitWindows', 'EXIT WINDOWS'), ui.sndButton));
     gc.onEvent = function (type, p2, p3) {
-      if (type === 8) { gTrans.set(st.auto ? 1 : 0); gPlate.setText(st.plateText); goBtn.setEnabled(true); }   // GO TO CITY starts disabled (FUN_0042a6c0); the game enables it
+      if (type === 8) { gTrans.set(st.auto ? 1 : 0); gPlate.setText(st.plateText); goBtn.setEnabled(false); }   // GO TO CITY starts disabled (FUN_0042a6c0); the game enables it on the host once 2 players chose a car (FUN_00426f00)
       const f = this.focus;
       if (f) switch (f.id) {
         case 0x11: if (type === 0xe) { cmd('mpgo'); return 0; } break;       // GO TO CITY (FUN_00426e80: host sends the start message)
